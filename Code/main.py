@@ -1,7 +1,7 @@
-from background__subtraction import gmm_background_subtraction
+from background__subtraction import gmm_background_subtraction_multi_pass
 #from stabilize import lucas_kanade_faster_video_stabilization
 import tracking
-import matting
+from matting import matting_main
 import os
 
 os.chdir('..')
@@ -25,10 +25,25 @@ if __name__ == "__main__":
                                         MAX_ITER_TAU,
                                         NUM_LEVELS_TAU)"""
                                         
-    gmm_background_subtraction(r"C:\Users\zaita\Downloads\FinalProject\Outputs\background_locked.avi",
-                                       r"C:\Users\zaita\Downloads\FinalProject\Outputs\binary.avi",
-                                        r"C:\Users\zaita\Downloads\FinalProject\Outputs\extracted.avi")
+    INPUT_VIDEO = r"C:\Users\zaita\Downloads\FinalProject\Outputs\background_locked.avi"
+    BINARY_OUTPUT = r"C:\Users\zaita\Downloads\FinalProject\Outputs\binary.avi"
+    EXTRACTED_OUTPUT = r"C:\Users\zaita\Downloads\FinalProject\Outputs\extracted.avi"
 
+    # Run background subtraction with flipped training
+    r"""gmm_background_subtraction_multi_pass(
+        INPUT_VIDEO,
+        BINARY_OUTPUT,
+        EXTRACTED_OUTPUT,
+        num_training_passes=5  # Total number of training passes before inference
+    )"""
+    # Define file paths
+    background_path = r"C:\Users\zaita\Downloads\FinalProject\Inputs\background.jpg"
+    colored_mask_path = r"C:\Users\zaita\Downloads\FinalProject\Outputs\extracted.avi"
+    binary_mask_path = r"C:\Users\zaita\Downloads\FinalProject\Outputs\binary.avi"
+    output_matted_path = r"C:\Users\zaita\Downloads\FinalProject\Outputs\matted.avi"
+    output_alpha_path = r"C:\Users\zaita\Downloads\FinalProject\Outputs\alpha.avi"
+
+    matting_main(background_path, colored_mask_path, binary_mask_path, output_matted_path, output_alpha_path)
     #tracking()
-    #matting()
+
     print("end")
