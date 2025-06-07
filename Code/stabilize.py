@@ -1,816 +1,306 @@
 import cv2
 import numpy as np
-from tqdm import tqdm
-from scipy import signal
-from scipy.interpolate import griddata
-import matplotlib.pyplot as plt
+
+# Configuration parameters
+MAX_CORNERS = 200
+QUALITY_LEVEL = 0.1
+MIN_DISTANCE = 5
+BLOCK_SIZE = 5
+RANSAC_THRESHOLD = 1.5
+MAX_ITERATIONS = 2000
+SMOOTHING_WINDOW = 2
+MIN_FEATURES_THRESHOLD = 150  # Minimum features to maintain before refreshing
+
+# Input and output file paths
+INPUT_VIDEO = r"C:\Users\zaita\Downloads\FinalProject\Inputs\INPUT.avi"
+OUTPUT_VIDEO = r"C:\Users\zaita\Downloads\FinalProject\Outputs\stabilize.avi"
+
+# Parameters for Lucas-Kanade optical flow
+lk_params = dict(winSize=(15, 15),
+                 maxLevel=3,
+                 criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03))
+
+# Parameters for feature detection
+feature_params = dict(maxCorners=MAX_CORNERS,
+                      qualityLevel=QUALITY_LEVEL,
+                      minDistance=MIN_DISTANCE,
+                      blockSize=BLOCK_SIZE)
 
 
-# FILL IN YOUR ID
-ID1 = 318452364
-ID2 = 207767021
+def detect_features(frame):
+    """Detect good features to track in the frame."""
+    corners = cv2.goodFeaturesToTrack(frame, mask=None, **feature_params)
+    return corners
 
 
-PYRAMID_FILTER = 1.0 / 256 * np.array([[1, 4, 6, 4, 1],
-                                       [4, 16, 24, 16, 4],
-                                       [6, 24, 36, 24, 6],
-                                       [4, 16, 24, 16, 4],
-                                       [1, 4, 6, 4, 1]])
-X_DERIVATIVE_FILTER = np.array([[1, 0, -1],
-                                [2, 0, -2],
-                                [1, 0, -1]])
-Y_DERIVATIVE_FILTER = X_DERIVATIVE_FILTER.copy().transpose()
+def track_features_from_reference(reference_gray, current_gray, reference_pts):
+    """Track features directly from reference frame to current frame."""
+    if reference_pts is None or len(reference_pts) == 0:
+        return None, None
 
-WINDOW_SIZE = 5
+    # Calculate optical flow from reference frame to current frame
+    current_pts, status, error = cv2.calcOpticalFlowPyrLK(reference_gray, current_gray,
+                                                          reference_pts, None, **lk_params)
 
+    # Select good points
+    if current_pts is not None:
+        good_ref = reference_pts[status == 1]
+        good_curr = current_pts[status == 1]
 
-def get_video_parameters(capture: cv2.VideoCapture) -> dict:
-    """Get an OpenCV capture object and extract its parameters.
+        # Additional filtering based on error
+        if len(good_ref) > 0:
+            error = error[status == 1]
+            error_threshold = np.median(error) + 2 * np.std(error)
+            mask = error.flatten() < error_threshold
+            good_ref = good_ref[mask]
+            good_curr = good_curr[mask]
 
-    Args:
-        capture: cv2.VideoCapture object.
+        return good_ref, good_curr
 
-    Returns:
-        parameters: dict. Video parameters extracted from the video.
-
-    """
-    fourcc = int(capture.get(cv2.CAP_PROP_FOURCC))
-    fps = int(capture.get(cv2.CAP_PROP_FPS))
-    height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
-    frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
-    return {"fourcc": fourcc, "fps": fps, "height": height, "width": width,
-            "frame_count": frame_count}
+    return None, None
 
 
-def build_pyramid(image: np.ndarray, num_levels: int) -> list[np.ndarray]:
-    """Coverts image to a pyramid list of size num_levels.
+def estimate_transformation(ref_pts, curr_pts):
+    """Estimate transformation from reference points to current points using RANSAC."""
+    if ref_pts is None or curr_pts is None or len(ref_pts) < 4:
+        return np.eye(2, 3, dtype=np.float32)
 
-    First, create a list with the original image in it. Then, iterate over the
-    levels. In each level, convolve the PYRAMID_FILTER with the image from the
-    previous level. Then, decimate the result using indexing: simply pick
-    every second entry of the result.
-    Hint: Use signal.convolve2d with boundary='symm' and mode='same'.
+    try:
+        # Use estimateAffinePartial2D for rigid transformation
+        transform_matrix, inliers = cv2.estimateAffinePartial2D(
+            ref_pts, curr_pts,
+            method=cv2.RANSAC,
+            ransacReprojThreshold=RANSAC_THRESHOLD,
+            maxIters=MAX_ITERATIONS
+        )
 
-    Args:
-        image: np.ndarray. Input image.
-        num_levels: int. The number of blurring / decimation times.
+        if transform_matrix is not None:
+            return transform_matrix
+        else:
+            return np.eye(2, 3, dtype=np.float32)
 
-    Returns:
-        pyramid: list. A list of np.ndarray of images.
-
-    Note that the list length should be num_levels + 1 as the in first entry of
-    the pyramid is the original image.
-    You are not allowed to use cv2 PyrDown here (or any other cv2 method).
-    We use a slightly different decimation process from this function.
-    """
-    pyramid = [image.copy()]
-    for level in range(num_levels):
-        current_image = pyramid[level]
-        blurred = signal.convolve2d(current_image, PYRAMID_FILTER, 
-                                   boundary='symm', mode='same')
-        decimated = blurred[::2, ::2]
-        pyramid.append(decimated)
-    return pyramid
+    except cv2.error:
+        return np.eye(2, 3, dtype=np.float32)
 
 
-def lucas_kanade_step(I1: np.ndarray,
-                      I2: np.ndarray,
-                      window_size: int) -> tuple[np.ndarray, np.ndarray]:
-    """Perform one Lucas-Kanade Step.
+def smooth_transformations(transforms, window_size=SMOOTHING_WINDOW):
+    """Smooth the transformation trajectory using a moving average."""
+    if len(transforms) < window_size:
+        return transforms
 
-    This method receives two images as inputs and a window_size. It
-    calculates the per-pixel shift in the x-axis and y-axis. That is,
-    it outputs two maps of the shape of the input images. The first map
-    encodes the per-pixel optical flow parameters in the x-axis and the
-    second in the y-axis.
+    smoothed_transforms = []
 
-    (1) Calculate Ix and Iy by convolving I2 with the appropriate filters (
-    see the constants in the head of this file).
-    (2) Calculate It from I1 and I2.
-    (3) Calculate du and dv for each pixel:
-      (3.1) Start from all-zeros du and dv (each one) of size I1.shape.
-      (3.2) Loop over all pixels in the image (you can ignore boundary pixels up
-      to ~window_size/2 pixels in each side of the image [top, bottom,
-      left and right]).
-      (3.3) For every pixel, pretend the pixel's neighbors have the same (u,
-      v). This means that for NxN window, we have N^2 equations per pixel.
-      (3.4) Solve for (u, v) using Least-Squares solution. When the solution
-      does not converge, keep this pixel's (u, v) as zero.
-    For detailed Equations reference look at slides 4 & 5 in:
-    http://www.cse.psu.edu/~rtc12/CSE486/lecture30.pdf
+    for i in range(len(transforms)):
+        # Define window bounds
+        start_idx = max(0, i - window_size // 2)
+        end_idx = min(len(transforms), i + window_size // 2 + 1)
 
-    Args:
-        I1: np.ndarray. Image at time t.
-        I2: np.ndarray. Image at time t+1.
-        window_size: int. The window is of shape window_size X window_size.
+        # Average transformations in the window
+        window_transforms = transforms[start_idx:end_idx]
+        avg_transform = np.mean(window_transforms, axis=0)
+        smoothed_transforms.append(avg_transform)
 
-    Returns:
-        (du, dv): tuple of np.ndarray-s. Each one is of the shape of the
-        original image. dv encodes the optical flow parameters in rows and du
-        in columns.
-    """
-    Ix = signal.convolve2d(I2, X_DERIVATIVE_FILTER, mode='same')
-    Iy = signal.convolve2d(I2, Y_DERIVATIVE_FILTER, mode='same')
-    It = I2 - I1
-    
-    du = np.zeros_like(I1)
-    dv = np.zeros_like(I1)
-    
-    w = window_size // 2
-
-    for i in range(w, I1.shape[0]-w):
-        for j in range(w, I1.shape[1]-w):
-            
-            # Extract window around current pixel
-            Ix_window = Ix[i-w:i+w+1, j-w:j+w+1].flatten()
-            Iy_window = Iy[i-w:i+w+1, j-w:j+w+1].flatten()
-            It_window = It[i-w:i+w+1, j-w:j+w+1].flatten()
-
-            A = np.vstack((Ix_window, Iy_window)).T             #  A matrix and b vector
-            b = -It_window         
-            # Solve least squares
-            try:
-                flow = np.linalg.lstsq(A, b, rcond=None)[0]
-                # Check if flow values are valid before assignment
-                if np.isfinite(flow[0]) and np.isfinite(flow[1]):
-                    du[i,j] = flow[0]
-                    dv[i,j] = flow[1]
-            except:
-                continue
-    return du, dv
+    return smoothed_transforms
 
 
-def warp_image(image: np.ndarray, u: np.ndarray, v: np.ndarray) -> np.ndarray:
-    """Warp image using the optical flow parameters in u and v.
+def calculate_centering_offset(transforms, frame_width, frame_height):
+    """Calculate the offset needed to center the average of all transformed frames."""
+    # Calculate the average translation across all transforms
+    total_dx = 0.0
+    total_dy = 0.0
 
-    Note that this method needs to support the case where u and v shapes do
-    not share the same shape as of the image. We will update u and v to the
-    shape of the image. The way to do it, is to:
-    (1) cv2.resize to resize the u and v to the shape of the image.
-    (2) Then, normalize the shift values according to a factor. This factor
-    is the ratio between the image dimension and the shift matrix (u or v)
-    dimension (the factor for u should take into account the number of columns
-    in u and the factor for v should take into account the number of rows in v).
+    for transform in transforms:
+        total_dx += transform[0, 2]  # x translation
+        total_dy += transform[1, 2]  # y translation
 
-    As for the warping, use `scipy.interpolate`'s `griddata` method. Define the
-    grid-points using a flattened version of the `meshgrid` of 0:w-1 and 0:h-1.
-    The values here are simply image.flattened().
-    The points you wish to interpolate are, again, a flattened version of the
-    `meshgrid` matrices - don't forget to add them v and u.
-    Use `np.nan` as `griddata`'s fill_value.
-    Finally, fill the nan holes with the source image values.
-    Hint: For the final step, use np.isnan(image_warp).
+    avg_dx = total_dx / len(transforms)
+    avg_dy = total_dy / len(transforms)
 
-    Args:
-        image: np.ndarray. Image to warp.
-        u: np.ndarray. Optical flow parameters corresponding to the columns.
-        v: np.ndarray. Optical flow parameters corresponding to the rows.
+    print(f"Average translation: dx={avg_dx:.2f}, dy={avg_dy:.2f}")
 
-    Returns:
-        image_warp: np.ndarray. Warped image.
-    """
-    h, w = image.shape
-    # If u and v are not the same size as image, scale before resizing
-    if u.shape != image.shape:
-        orig_h, orig_w = u.shape
-        u = u * (w / orig_w)
-        v = v * (h / orig_h)
-        u = cv2.resize(u, (w, h), interpolation=cv2.INTER_LINEAR)
-        v = cv2.resize(v, (w, h), interpolation=cv2.INTER_LINEAR)
+    # Calculate offset to center the average position
+    center_x = frame_width / 2.0
+    center_y = frame_height / 2.0
 
-    # Create meshgrid of coordinates
-    x, y = np.meshgrid(np.arange(w), np.arange(h))
-    map_x = (x + u).astype(np.float32)
-    map_y = (y + v).astype(np.float32)
+    # The centering offset moves the average position back to the center
+    offset_x = -avg_dx
+    offset_y = -avg_dy
 
-    # Use cv2.remap for efficient warping
-    image_warp = cv2.remap(image, map_x, map_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+    print(f"Centering offset: offset_x={offset_x:.2f}, offset_y={offset_y:.2f}")
 
-    # Ensure output dtype matches input
-    if image_warp.dtype != image.dtype:
-        image_warp = np.clip(image_warp, 0, 255).astype(image.dtype)
-    return image_warp
+    return offset_x, offset_y
 
 
-def lucas_kanade_optical_flow(I1: np.ndarray,
-                              I2: np.ndarray,
-                              window_size: int,
-                              max_iter: int,
-                              num_levels: int) -> tuple[np.ndarray, np.ndarray]:
-    """Calculate LK Optical Flow for max iterations in num-levels.
+def apply_centering_to_transforms(transforms, offset_x, offset_y):
+    """Apply centering offset to all transformation matrices."""
+    centered_transforms = []
 
-    Args:
-        I1: np.ndarray. Image at time t.
-        I2: np.ndarray. Image at time t+1.
-        window_size: int. The window is of shape window_size X window_size.
-        max_iter: int. Maximal number of LK-steps for each level of the pyramid.
-        num_levels: int. Number of pyramid levels.
+    for transform in transforms:
+        # Create a copy of the transform
+        centered_transform = transform.copy()
 
-    Returns:
-        (u, v): tuple of np.ndarray-s. Each one of the shape of the
-        original image. v encodes the optical flow parameters in rows and u in
-        columns.
-    """
-    h_factor = int(np.ceil(I1.shape[0] / (2 ** (num_levels - 1))))
-    w_factor = int(np.ceil(I1.shape[1] / (2 ** (num_levels - 1))))
-    target_size = (w_factor * (2 ** (num_levels - 1)), 
-                  h_factor * (2 ** (num_levels - 1)))
-    
-    
-    if I1.shape != target_size:     # Resize images if needed
-        I1 = cv2.resize(I1, target_size)
-    if I2.shape != target_size:
-        I2 = cv2.resize(I2, target_size)
-    
-    pyramid_I1 = build_pyramid(I1, num_levels)
-    pyramid_I2 = build_pyramid(I2, num_levels)
-    
+        # Add the centering offset to the translation component
+        centered_transform[0, 2] += offset_x  # x translation
+        centered_transform[1, 2] += offset_y  # y translation
 
-    u = np.zeros(pyramid_I2[-1].shape)
-    v = np.zeros(pyramid_I2[-1].shape)
-    
-    for level in range(num_levels-1, -1, -1):
-        I1_level = pyramid_I1[level]
-        I2_level = pyramid_I2[level]
-        
-        # Resize u and v to current level
-        if level != num_levels-1:
-            u = cv2.resize(u, (I1_level.shape[1], I1_level.shape[0])) * 2
-            v = cv2.resize(v, (I1_level.shape[1], I1_level.shape[0])) * 2
+        centered_transforms.append(centered_transform)
 
-        rows, cols = I2_level.shape
-        y_coords, x_coords = np.mgrid[0:rows, 0:cols]
-        
-        for _ in range(max_iter):   #does itterations
-            if u.shape != I2_level.shape:
-                u = cv2.resize(u, (I2_level.shape[1], I2_level.shape[0]))
-            if v.shape != I2_level.shape:
-                v = cv2.resize(v, (I2_level.shape[1], I2_level.shape[0]))
-            
-            coords = np.stack([x_coords + u, y_coords + v], axis=-1)
-            I2_warp = griddata((x_coords.flatten(), y_coords.flatten()), 
-                             I2_level.flatten(),
-                             coords.reshape(-1, 2),
-                             method='linear',
-                             fill_value=0).reshape(I2_level.shape)
-            
-            du, dv = lucas_kanade_step(I1_level, I2_warp, window_size)
-            
-            if du.shape != u.shape:     # make sure size are good
-                du = cv2.resize(du, (u.shape[1], u.shape[0]))
-            if dv.shape != v.shape:
-                dv = cv2.resize(dv, (v.shape[1], v.shape[0]))
-            
-            u += du
-            v += dv
-    
-    
-    if u.shape != I1.shape:     ## Resize  u and v if not the same size as i1
-        u = cv2.resize(u, (I1.shape[1], I1.shape[0]))
-    if v.shape != I1.shape:
-        v = cv2.resize(v, (I1.shape[1], I1.shape[0]))
-    
-    return u, v
+    return centered_transforms
 
 
-def lucas_kanade_video_stabilization(input_video_path: str,
-                                     output_video_path: str,
-                                     window_size: int,
-                                     max_iter: int,
-                                     num_levels: int) -> None:
-    """Use LK Optical Flow to stabilize the video and save it to file.
+# Main stabilization process
+print("Starting absolute video stabilization with centering...")
 
-    Args:
-        input_video_path: str. path to input video.
-        output_video_path: str. path to output stabilized video.
-        window_size: int. The window is of shape window_size X window_size.
-        max_iter: int. Maximal number of LK-steps for each level of the pyramid.
-        num_levels: int. Number of pyramid levels.
+# Open input video
+cap = cv2.VideoCapture(INPUT_VIDEO)
+if not cap.isOpened():
+    print(f"Error: Could not open video file '{INPUT_VIDEO}'")
+    exit(1)
 
-    Returns:
-        None.
+# Get video properties
+fps = int(cap.get(cv2.CAP_PROP_FPS))
+width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-    Recipe:
-        (1) Open a VideoCapture object of the input video and read its
-        parameters.
-        (2) Create an output video VideoCapture object with the same
-        parameters as in (1) in the path given here as input.
-        (3) Convert the first frame to grayscale and write it as-is to the
-        output video.
-        (4) Resize the first frame as in the Full-Lucas-Kanade function to
-        K * (2^(num_levels - 1)) X M * (2^(num_levels - 1)).
-        Where: K is the ceil(h / (2^(num_levels - 1)),
-        and M is ceil(h / (2^(num_levels - 1)).
-        (5) Create a u and a v which are og the size of the image.
-        (6) Loop over the frames in the input video (use tqdm to monitor your
-        progress) and:
-          (6.1) Resize them to the shape in (4).
-          (6.2) Feed them to the lucas_kanade_optical_flow with the previous
-          frame.
-          (6.3) Use the u and v maps obtained from (6.2) and compute their
-          mean values over the region that the computation is valid (exclude
-          half window borders from every side of the image).
-          (6.4) Update u and v to their mean values inside the valid
-          computation region.
-          (6.5) Add the u and v shift from the previous frame diff such that
-          frame in the t is normalized all the way back to the first frame.
-          (6.6) Save the updated u and v for the next frame (so you can
-          perform step 6.5 for the next frame.
-          (6.7) Finally, warp the current frame with the u and v you have at
-          hand.
-          (6.8) We highly recommend you to save each frame to a directory for
-          your own debug purposes. Erase that code when submitting the exercise.
-       (7) Do not forget to gracefully close all VideoCapture and to destroy
-       all windows.
-    """
-    # Open input video and read parameters
-    cap = cv2.VideoCapture(input_video_path)
-    # Get video properties
-    video_parameters = get_video_parameters(cap)
-    w = frame_width = video_parameters["width"] # Corrected here
-    h = frame_height = video_parameters["height"]
-    fps = video_parameters["fps"]
+print(f"Video properties: {width}x{height}, {fps} fps, {total_frames} frames")
 
-    # Create output video writer
-    fourcc = cv2.VideoWriter_fourcc(*'XVID')
-    out = cv2.VideoWriter(output_video_path, fourcc, fps, (frame_width, frame_height))
+# Setup video writer
+fourcc = cv2.VideoWriter_fourcc(*'XVID')
+out = cv2.VideoWriter(OUTPUT_VIDEO, fourcc, fps, (width, height))
 
-    # Read first frame
-    ret, first_frame = cap.read()
+# Initialize variables for first pass
+reference_gray = None
+reference_features = None
+absolute_transforms = []  # Direct transformations from reference frame
+frame_count = 0
+features_refreshed_count = 0
+
+print("First pass: Computing absolute transformations from reference frame...")
+
+# First pass: Extract absolute transformations from reference frame
+while True:
+    ret, frame = cap.read()
     if not ret:
-        cap.release()
-        return
+        break
 
-    # Write first frame as-is to output
-    out.write(first_frame)
+    # Convert to grayscale
+    curr_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-    # Convert to grayscale for calculations
-    first_gray = cv2.cvtColor(first_frame, cv2.COLOR_BGR2GRAY)
+    if reference_gray is None:
+        # First frame - set as reference
+        reference_gray = curr_gray.copy()
+        reference_features = detect_features(reference_gray)
+        absolute_transforms.append(np.eye(2, 3, dtype=np.float32))  # Identity for first frame
+        print(f"Reference frame set with {len(reference_features) if reference_features is not None else 0} features")
+    else:
+        # Track features directly from reference frame to current frame
+        good_ref, good_curr = track_features_from_reference(reference_gray, curr_gray, reference_features)
 
-    # Resize to dimensions divisible by 2^num_levels
-    h_factor = int(np.ceil(first_gray.shape[0] / (2 ** num_levels)))
-    w_factor = int(np.ceil(first_gray.shape[1] / (2 ** num_levels)))
-    new_h = h_factor * (2 ** num_levels)
-    new_w = w_factor * (2 ** num_levels)
-    
-    # Initialize accumulated flow
-    u_accum = np.zeros((new_h, new_w), dtype=np.float32)
-    v_accum = np.zeros((new_h, new_w), dtype=np.float32)
-    
-    prev_gray_resized = cv2.resize(first_gray, (new_w, new_h))
+        if good_ref is not None and len(good_ref) >= MIN_FEATURES_THRESHOLD:
+            # Estimate transformation directly from reference frame to current frame
+            transform = estimate_transformation(good_ref, good_curr)
+            absolute_transforms.append(transform)
+        else:
+            # Not enough features - try to refresh feature set
+            print(
+                f"Frame {frame_count}: Only {len(good_ref) if good_ref is not None else 0} features tracked, refreshing...")
 
-    # Process each frame
-    frame_count = video_parameters["frame_count"]
-    pbar = tqdm(total=frame_count - 1)
+            # Use previous transform if available, otherwise identity
+            if len(absolute_transforms) > 0:
+                absolute_transforms.append(absolute_transforms[-1])  # Use previous transform
+            else:
+                absolute_transforms.append(np.eye(2, 3, dtype=np.float32))
 
-    while True:
-        # Read next frame
-        ret, curr_frame = cap.read()
-        if not ret:
-            break
+            # Refresh reference features for better tracking
+            new_features = detect_features(curr_gray)
+            if new_features is not None and len(new_features) > len(
+                    reference_features) if reference_features is not None else True:
+                # Warp new features back to reference frame coordinate system
+                try:
+                    if len(absolute_transforms) > 1:
+                        inv_transform = np.linalg.inv(np.vstack([absolute_transforms[-1], [0, 0, 1]]))[:2, :]
+                        reference_features = cv2.transform(new_features.reshape(-1, 1, 2),
+                                                           np.vstack([inv_transform, [0, 0, 1]])).reshape(-1, 1, 2)
+                    else:
+                        reference_features = new_features
+                    features_refreshed_count += 1
+                except:
+                    # If transformation fails, keep old features
+                    pass
 
-        # Convert to grayscale for calculations
-        curr_gray = cv2.cvtColor(curr_frame, cv2.COLOR_BGR2GRAY)
-        curr_gray_resized = cv2.resize(curr_gray, (int(new_w), int(new_h)))
+    frame_count += 1
+    if frame_count % 50 == 0:
+        print(f"Analyzed {frame_count}/{total_frames} frames")
 
-        # Calculate optical flow
-        u, v = lucas_kanade_optical_flow(prev_gray_resized,
-                                         curr_gray_resized,
-                                         window_size,
-                                         max_iter,
-                                         num_levels)
+print(f"Features were refreshed {features_refreshed_count} times during tracking")
+print("Smoothing absolute transformations...")
 
-        # Calculate mean motion in valid region (excluding borders)
-        half_window = window_size // 2
-        valid_region_u = u[half_window:-half_window, half_window:-half_window]
-        valid_region_v = v[half_window:-half_window, half_window:-half_window]
+# Smooth the absolute transformations
+smoothed_absolute_transforms = smooth_transformations(absolute_transforms, SMOOTHING_WINDOW)
 
-        u_mean = np.mean(valid_region_u)
-        v_mean = np.mean(valid_region_v)
+# Calculate centering offset to center the average of all transformed frames
+print("Calculating centering offset...")
+offset_x, offset_y = calculate_centering_offset(smoothed_absolute_transforms, width, height)
 
-        # Create uniform motion maps with mean values
-        u_uniform = np.full((new_h, new_w), u_mean)
-        v_uniform = np.full((new_h, new_w), v_mean)
+# Apply centering offset to all transforms
+print("Applying centering offset to transformations...")
+centered_transforms = apply_centering_to_transforms(smoothed_absolute_transforms, offset_x, offset_y)
 
-        # Accumulate motion - this is a critical step for stabilization
-        # We want to stabilize relative to the first frame
-        u_accum = u_accum + u_uniform  # Add current displacement to accumulated
-        v_accum = v_accum + v_uniform
+# Reset video capture for second pass
+cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+frame_count = 0
 
-        # Need to resize to match frame dimensions before warping
-        u_resized = cv2.resize(u_accum, (w, h))
-        v_resized = cv2.resize(v_accum, (w, h))
+print("Second pass: Applying centered absolute stabilization...")
 
-        # Scale the flow values after resizing
-        u_resized = u_resized * (w / new_w)
-        v_resized = v_resized * (h / new_h)
+# Second pass: Apply centered absolute stabilization
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
 
-        # Warp the current frame using accumulated flow
-        curr_gray_stabilized = warp_image(curr_gray, u_resized, v_resized)
+    if frame_count == 0:
+        # First frame - apply centering offset
+        centering_transform = np.array([[1, 0, offset_x], [0, 1, offset_y]], dtype=np.float32)
+        stabilized_frame = cv2.warpAffine(frame, centering_transform, (width, height),
+                                          borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+    elif frame_count < len(centered_transforms):
+        # Get the centered absolute transformation
+        absolute_transform = centered_transforms[frame_count]
 
-        # Ensure output is in the correct format
-        curr_gray_stabilized = np.clip(curr_gray_stabilized, 0, 255).astype(np.uint8)
-
-        # Convert back to BGR for output
-        curr_frame_stabilized = cv2.cvtColor(curr_gray_stabilized, cv2.COLOR_GRAY2BGR)
-
-        # Write stabilized frame to output
-        out.write(curr_frame_stabilized)
-
-        # Update previous frame
-        prev_gray_resized = curr_gray_resized
-        pbar.update(1)
-
-    # Clean up
-    pbar.close()
-    cap.release()
-    out.release()
-    cv2.destroyAllWindows()
-
-
-def faster_lucas_kanade_step(I1: np.ndarray,
-                             I2: np.ndarray,
-                             window_size: int) -> tuple[np.ndarray, np.ndarray]:
-    """Faster implementation of a single Lucas-Kanade Step.
-
-    (1) If the image is small enough (you need to design what is good
-    enough), simply return the result of the good old lucas_kanade_step
-    function.
-    (2) Otherwise, find corners in I2 and calculate u and v only for these
-    pixels.
-    (3) Return maps of u and v which are all zeros except for the corner
-    pixels you found in (2).
-
-    Args:
-        I1: np.ndarray. Image at time t.
-        I2: np.ndarray. Image at time t+1.
-        window_size: int. The window is of shape window_size X window_size.
-
-    Returns:
-        (du, dv): tuple of np.ndarray-s. Each one of the shape of the
-        original image. dv encodes the shift in rows and du in columns.
-    """
-    # If image is small enough, use regular lucas_kanade_step
-    if I1.shape[0] * I1.shape[1] < 6000:  # Threshold of 50000 pixels
-        return lucas_kanade_step(I1, I2, window_size)
-    
-    
-    du = np.zeros_like(I1, dtype=np.float32)
-    dv = np.zeros_like(I1, dtype=np.float32)
-    
-    # Use cv2.cornerHarris for corner detection
-    blockSize = 2
-    ksize = 3
-    k = 0.04
-    harris_response = cv2.cornerHarris(I2.astype(np.float32), blockSize, ksize, k)
-    # Threshold for an optimal value, it may vary depending on the image.
-    threshold = 0.05 * harris_response.max()
-    corners = np.argwhere(harris_response > threshold)
-    # corners is a list of (row, col) = (y, x)
-    # Optionally, limit to 100 strongest corners
-    if corners.shape[0] > 100:
-        # Sort by response strength
-        strengths = harris_response[corners[:,0], corners[:,1]]
-        idx = np.argsort(strengths)[-100:]
-        corners = corners[idx]
-    # Create a visualization of corners on I2
-    """corner_vis = cv2.cvtColor(I2.astype(np.uint8), cv2.COLOR_GRAY2BGR)
-    corner_vis[corners[:,0], corners[:,1]] = [0, 0, 255]  # Mark corners in red
-    plt.figure()
-    plt.imshow(corner_vis)
-    plt.title('Detected Corners')
-    plt.axis('off')
-    plt.show()"""
-    w = window_size // 2
-    Ix = signal.convolve2d(I2, X_DERIVATIVE_FILTER, mode='same')
-    Iy = signal.convolve2d(I2, Y_DERIVATIVE_FILTER, mode='same')
-    It = I2 - I1
-    corner_points = []
-    du_corners = []
-    dv_corners = []
-    for i, j in corners:
-        if i < w or i >= I1.shape[0]-w or j < w or j >= I1.shape[1]-w:
-            continue
-        Ix_window = Ix[i-w:i+w+1, j-w:j+w+1].flatten()
-        Iy_window = Iy[i-w:i+w+1, j-w:j+w+1].flatten()
-        It_window = It[i-w:i+w+1, j-w:j+w+1].flatten()
-        A = np.vstack((Ix_window, Iy_window)).T
-        b = -It_window
+        # Apply inverse transformation to warp current frame back to reference frame
         try:
-            flow = np.linalg.lstsq(A, b, rcond=None)[0]
-            corner_points.append([i, j])
-            du_corners.append(flow[0])
-            dv_corners.append(flow[1])
-        except:
-            continue
-    # Interpolate sparse flow to dense flow
-    if len(corner_points) > 0:
-        corner_points = np.array(corner_points)
-        from scipy.interpolate import griddata
-        grid_y, grid_x = np.mgrid[0:I1.shape[0], 0:I1.shape[1]]
-        du_dense = griddata(corner_points, du_corners, (grid_y, grid_x), method='linear', fill_value=0)
-        dv_dense = griddata(corner_points, dv_corners, (grid_y, grid_x), method='linear', fill_value=0)
-        du = du_dense.astype(np.float32)
-        dv = dv_dense.astype(np.float32)
-    return du, dv
+            # Create 3x3 matrix for inversion
+            full_transform = np.vstack([absolute_transform, [0, 0, 1]])
+            inv_transform = np.linalg.inv(full_transform)[:2, :]
 
+            # Apply transformation to align frame with reference frame
+            stabilized_frame = cv2.warpAffine(frame, inv_transform, (width, height),
+                                              borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        except np.linalg.LinAlgError:
+            # If inversion fails, use original frame with centering
+            centering_transform = np.array([[1, 0, offset_x], [0, 1, offset_y]], dtype=np.float32)
+            stabilized_frame = cv2.warpAffine(frame, centering_transform, (width, height),
+                                              borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+            print(f"Warning: Transform inversion failed for frame {frame_count}")
+    else:
+        # Apply centering to any remaining frames
+        centering_transform = np.array([[1, 0, offset_x], [0, 1, offset_y]], dtype=np.float32)
+        stabilized_frame = cv2.warpAffine(frame, centering_transform, (width, height),
+                                          borderMode=cv2.BORDER_CONSTANT, borderValue=0)
 
-def faster_lucas_kanade_optical_flow(
-        I1: np.ndarray, I2: np.ndarray, window_size: int, max_iter: int,
-        num_levels: int) -> tuple[np.ndarray, np.ndarray]:
-    """Calculate LK Optical Flow for max iterations in num-levels .
+    # Write stabilized frame
+    out.write(stabilized_frame)
 
-    Use faster_lucas_kanade_step instead of lucas_kanade_step.
+    frame_count += 1
+    if frame_count % 50 == 0:
+        print(f"Stabilized {frame_count}/{total_frames} frames")
 
-    Args:
-        I1: np.ndarray. Image at time t.
-        I2: np.ndarray. Image at time t+1.
-        window_size: int. The window is of shape window_size X window_size.
-        max_iter: int. Maximal number of LK-steps for each level of the pyramid.
-        num_levels: int. Number of pyramid levels.
+# Cleanup
+cap.release()
+out.release()
 
-    Returns:
-        (u, v): tuple of np.ndarray-s. Each one of the shape of the
-        original image. v encodes the shift in rows and u in columns.
-    """
-    h_factor = int(np.ceil(I1.shape[0] / (2 ** num_levels)))
-    w_factor = int(np.ceil(I1.shape[1] / (2 ** num_levels)))
-    IMAGE_SIZE = (w_factor * (2 ** num_levels),
-                  h_factor * (2 ** num_levels))
-    if I1.shape != IMAGE_SIZE:
-        I1 = cv2.resize(I1, IMAGE_SIZE)
-    if I2.shape != IMAGE_SIZE:
-        I2 = cv2.resize(I2, IMAGE_SIZE)
-    pyramid_I1 = build_pyramid(I1, num_levels)  # create levels list for I1
-    pyarmid_I2 = build_pyramid(I2, num_levels)  # create levels list for I1
-    u = np.zeros(pyarmid_I2[-1].shape)  # create u in the size of smallest image
-    v = np.zeros(pyarmid_I2[-1].shape)  # create v in the size of smallest image
-    """INSERT YOUR CODE HERE.
-    Replace u and v with their true value."""
-
-    
-    for level in range(num_levels-1, -1, -1):
-        I1_level = pyramid_I1[level]
-        I2_level = pyarmid_I2[level]
-        
-        # Resize u and v to current level
-        if level != num_levels-1:
-            u = cv2.resize(u, (I1_level.shape[1], I1_level.shape[0])) * 2
-            v = cv2.resize(v, (I1_level.shape[1], I1_level.shape[0])) * 2
-
-        rows, cols = I2_level.shape
-        y_coords, x_coords = np.mgrid[0:rows, 0:cols]
-        
-        for _ in range(max_iter):   #does itterations
-            if u.shape != I2_level.shape:
-                u = cv2.resize(u, (I2_level.shape[1], I2_level.shape[0]))
-            if v.shape != I2_level.shape:
-                v = cv2.resize(v, (I2_level.shape[1], I2_level.shape[0]))
-            
-            coords = np.stack([x_coords + u, y_coords + v], axis=-1)
-            I2_warp = griddata((x_coords.flatten(), y_coords.flatten()), 
-                             I2_level.flatten(),
-                             coords.reshape(-1, 2),
-                             method='linear',
-                             fill_value=0).reshape(I2_level.shape)
-            
-            du, dv = faster_lucas_kanade_step(I1_level, I2_warp, window_size)
-            
-            if du.shape != u.shape:     # make sure size are good
-                du = cv2.resize(du, (u.shape[1], u.shape[0]))
-            if dv.shape != v.shape:
-                dv = cv2.resize(dv, (v.shape[1], v.shape[0]))
-            
-            u += du
-            v += dv
-    
-    
-    if u.shape != I1.shape:     ## Resize  u and v if not the same size as i1
-        u = cv2.resize(u, (I1.shape[1], I1.shape[0]))
-    if v.shape != I1.shape:
-        v = cv2.resize(v, (I1.shape[1], I1.shape[0]))
-    
-    return u, v
-
-
-def lucas_kanade_faster_video_stabilization(
-        input_video_path: str, output_video_path: str, window_size: int,
-        max_iter: int, num_levels: int) -> None:
-    """Calculate LK Optical Flow to stabilize the video and save it to file.
-
-    Args:
-        input_video_path: str. path to input video.
-        output_video_path: str. path to output stabilized video.
-        window_size: int. The window is of shape window_size X window_size.
-        max_iter: int. Maximal number of LK-steps for each level of the pyramid.
-        num_levels: int. Number of pyramid levels.
-
-    Returns:
-        None.
-    """
-    # Open input video and read parameters
-    cap = cv2.VideoCapture(input_video_path)
-    # Get video properties
-    video_parameters = get_video_parameters(cap)
-    frame_width = video_parameters["width"]
-    frame_height = video_parameters["height"]
-    fps = video_parameters["fps"]
-
-    # Create output video writer
-    fourcc = cv2.VideoWriter_fourcc(*'XVID')
-    out = cv2.VideoWriter(output_video_path, fourcc, fps, (frame_width, frame_height))
-
-    # Read first frame
-    ret, first_frame = cap.read()
-    if not ret:
-        cap.release()
-        return
-
-    # Write first frame as-is to output
-    out.write(first_frame)
-
-    # Convert to grayscale for calculations
-    first_gray = cv2.cvtColor(first_frame, cv2.COLOR_BGR2GRAY)
-
-    # Resize to dimensions divisible by 2^num_levels
-    h_factor = int(np.ceil(first_gray.shape[0] / (2 ** num_levels)))
-    w_factor = int(np.ceil(first_gray.shape[1] / (2 ** num_levels)))
-    new_h = h_factor * (2 ** num_levels)
-    new_w = w_factor * (2 ** num_levels)
-    
-    # Initialize accumulated flow
-    u_accum = np.zeros((new_h, new_w), dtype=np.float32)
-    v_accum = np.zeros((new_h, new_w), dtype=np.float32)
-    
-    prev_gray_resized = cv2.resize(first_gray, (new_w, new_h))
-
-    # Process each frame
-    frame_count = video_parameters["frame_count"]
-    pbar = tqdm(total=frame_count - 1)
-
-    while True:
-        # Read next frame
-        ret, curr_frame = cap.read()
-        if not ret:
-            break
-
-        # Convert to grayscale for calculations
-        curr_gray = cv2.cvtColor(curr_frame, cv2.COLOR_BGR2GRAY)
-        curr_gray_resized = cv2.resize(curr_gray, (int(new_w), int(new_h)))
-
-        # Calculate optical flow
-        u, v = faster_lucas_kanade_optical_flow(prev_gray_resized,
-                                         curr_gray_resized,
-                                         window_size,
-                                         max_iter,
-                                         num_levels)
-
-        # Calculate mean motion in valid region (excluding borders)
-        half_window = window_size // 2
-        valid_region_u = u[half_window:-half_window, half_window:-half_window]
-        valid_region_v = v[half_window:-half_window, half_window:-half_window]
-
-        u_mean = np.mean(valid_region_u)
-        v_mean = np.mean(valid_region_v)
-
-        # Create uniform motion maps with mean values
-        u_uniform = np.full((new_h, new_w), u_mean)
-        v_uniform = np.full((new_h, new_w), v_mean)
-
-        # Accumulate motion - this is a critical step for stabilization
-        # We want to stabilize relative to the first frame
-        u_accum = u_accum + u_uniform  # Add current displacement to accumulated
-        v_accum = v_accum + v_uniform
-
-        # Resize to match frame dimensions
-        h, w = curr_gray.shape
-        u_resized = cv2.resize(u_accum, (w, h))
-        v_resized = cv2.resize(v_accum, (w, h))
-
-        # Scale the flow values after resizing
-        u_resized = u_resized * (w / new_w)
-        v_resized = v_resized * (h / new_h)
-
-        # Warp the current frame using accumulated flow
-        curr_gray_stabilized = warp_image(curr_gray, u_resized, v_resized)
-
-        # Ensure output is in the correct format
-        curr_gray_stabilized = np.clip(curr_gray_stabilized, 0, 255).astype(np.uint8)
-
-        # Convert back to BGR for output
-        curr_frame_stabilized = cv2.cvtColor(curr_gray_stabilized, cv2.COLOR_GRAY2BGR)
-
-        # Write stabilized frame to output
-        out.write(curr_frame_stabilized)
-
-        # Update previous frame
-        prev_gray_resized = curr_gray_resized
-        pbar.update(1)
-
-    # Clean up
-    pbar.close()
-    cap.release()
-    out.release()
-    cv2.destroyAllWindows()
-
-
-def lucas_kanade_faster_video_stabilization_fix_effects(
-        input_video_path: str, output_video_path: str, window_size: int,
-        max_iter: int, num_levels: int, start_rows: int = 10,
-        start_cols: int = 2, end_rows: int = 30, end_cols: int = 30) -> None:
-    """Calculate LK Optical Flow to stabilize the video and save it to file.
-
-    Args:
-        input_video_path: str. path to input video.
-        output_video_path: str. path to output stabilized video.
-        window_size: int. The window is of shape window_size X window_size.
-        max_iter: int. Maximal number of LK-steps for each level of the pyramid.
-        num_levels: int. Number of pyramid levels.
-        start_rows: int. The number of lines to cut from top.
-        end_rows: int. The number of lines to cut from bottom.
-        start_cols: int. The number of columns to cut from left.
-        end_cols: int. The number of columns to cut from right.
-
-    Returns:
-        None.
-    """
-    cap = cv2.VideoCapture(input_video_path)
-    video_parameters = get_video_parameters(cap)
-    frame_width = video_parameters["width"]
-    frame_height = video_parameters["height"]
-    fps = video_parameters["fps"]
-
-    cropped_width = frame_width - start_cols - end_cols
-    cropped_height = frame_height - start_rows - end_rows
-
-    fourcc = cv2.VideoWriter_fourcc(*'XVID')
-    out = cv2.VideoWriter(output_video_path, fourcc, fps, (cropped_width, cropped_height))
-
-    ret, first_frame = cap.read()
-    if not ret:
-        cap.release()
-        return
-
-    first_frame_cropped = first_frame[start_rows:frame_height-end_rows, 
-                                     start_cols:frame_width-end_cols]
-    out.write(first_frame_cropped)
-
-    first_gray = cv2.cvtColor(first_frame, cv2.COLOR_BGR2GRAY)
-
-    h_factor = int(np.ceil(first_gray.shape[0] / (2 ** num_levels)))
-    w_factor = int(np.ceil(first_gray.shape[1] / (2 ** num_levels)))
-    new_h = h_factor * (2 ** num_levels)
-    new_w = w_factor * (2 ** num_levels)
-    
-    u_accum = np.zeros((new_h, new_w), dtype=np.float32)
-    v_accum = np.zeros((new_h, new_w), dtype=np.float32)
-    
-    prev_gray_resized = cv2.resize(first_gray, (new_w, new_h))
-
-    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) - 1
-    pbar = tqdm(total=frame_count, desc="Stabilizing Video")
-
-    while True:
-        ret, curr_frame = cap.read()
-        if not ret:
-            break
-        curr_gray = cv2.cvtColor(curr_frame, cv2.COLOR_BGR2GRAY)
-        curr_gray_resized = cv2.resize(curr_gray, (new_w, new_h))
-        u, v = faster_lucas_kanade_optical_flow(prev_gray_resized, 
-                                               curr_gray_resized, 
-                                               window_size, 
-                                               max_iter, 
-                                               num_levels)
-        half_window = window_size // 2
-        valid_region_u = u[half_window:-half_window, half_window:-half_window]
-        valid_region_v = v[half_window:-half_window, half_window:-half_window]
-
-        u_mean = np.mean(valid_region_u)
-        v_mean = np.mean(valid_region_v)
-
-        u_uniform = np.full((new_h, new_w), u_mean)
-        v_uniform = np.full((new_h, new_w), v_mean)
-        u_accum = u_accum + u_uniform
-        v_accum = v_accum + v_uniform
-        h, w = curr_gray.shape
-        u_resized = cv2.resize(u_accum, (w, h))
-        v_resized = cv2.resize(v_accum, (w, h))
-        u_resized = u_resized * (w / new_w)
-        v_resized = v_resized * (h / new_h)
-        curr_gray_stabilized = warp_image(curr_gray, u_resized, v_resized)
-        curr_gray_stabilized = np.clip(curr_gray_stabilized, 0, 255).astype(np.uint8)
-        curr_frame_stabilized = cv2.cvtColor(curr_gray_stabilized, cv2.COLOR_GRAY2BGR)
-        curr_frame_cropped = curr_frame_stabilized[start_rows:frame_height-end_rows, 
-                                                  start_cols:frame_width-end_cols]
-        out.write(curr_frame_cropped)
-        prev_gray_resized = curr_gray_resized
-        pbar.update(1)
-
-    # Clean up
-    pbar.close()
-    cap.release()
-    out.release()
-    cv2.destroyAllWindows()
-
-
+print(f"Centered absolute video stabilization completed!")
+print(f"Stabilized video saved as: {OUTPUT_VIDEO}")
+print(f"All {len(absolute_transforms)} frames aligned to reference frame and centered")
+print("Video is now centered - the average position of all stabilized frames is at the center")

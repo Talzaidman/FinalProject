@@ -1,5 +1,5 @@
-from background__subtraction import extract_moving_objects_from_video_ultra_fast
-from stabilize import lucas_kanade_faster_video_stabilization
+from background__subtraction import gmm_background_subtraction
+#from stabilize import lucas_kanade_faster_video_stabilization
 import tracking
 import matting
 import os
@@ -25,9 +25,9 @@ if __name__ == "__main__":
                                         MAX_ITER_TAU,
                                         NUM_LEVELS_TAU)"""
                                         
-    extract_moving_objects_from_video_ultra_fast(r"C:\Users\zaita\Downloads\FinalProject\Outputs\ultra_stable.avi",
-                                       r"C:\Users\zaita\Downloads\FinalProject\Outputs\extracted.avi",
-                                        r"C:\Users\zaita\Downloads\FinalProject\Outputs\binary.avi",   threshold=3.0)
+    gmm_background_subtraction(r"C:\Users\zaita\Downloads\FinalProject\Outputs\background_locked.avi",
+                                       r"C:\Users\zaita\Downloads\FinalProject\Outputs\binary.avi",
+                                        r"C:\Users\zaita\Downloads\FinalProject\Outputs\extracted.avi")
 
     #tracking()
     #matting()

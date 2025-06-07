@@ -1,312 +1,173 @@
 import cv2
 import numpy as np
-from tqdm import tqdm
-from scipy import signal
-from scipy.interpolate import griddata
-import matplotlib.pyplot as plt
-
-# FILL IN YOUR ID
-ID1 = 318452364
-ID2 = 207767021
-
-PYRAMID_FILTER = 1.0 / 256 * np.array([[1, 4, 6, 4, 1],
-                                       [4, 16, 24, 16, 4],
-                                       [6, 24, 36, 24, 6],
-                                       [4, 16, 24, 16, 4],
-                                       [1, 4, 6, 4, 1]])
-X_DERIVATIVE_FILTER = np.array([[1, 0, -1],
-                                [2, 0, -2],
-                                [1, 0, -1]])
-Y_DERIVATIVE_FILTER = X_DERIVATIVE_FILTER.copy().transpose()
-
-WINDOW_SIZE = 5
+import os
 
 
-def get_video_parameters(capture: cv2.VideoCapture) -> dict:
-    """Get an OpenCV capture object and extract its parameters.
+def gmm_background_subtraction(input_path, binary_output_path=None, extracted_output_path=None):
+    """
+    Perform background subtraction using Gaussian Mixture Model (GMM) method.
+    Saves both binary mask and extracted foreground videos.
 
     Args:
-        capture: cv2.VideoCapture object.
-
-    Returns:
-        parameters: dict. Video parameters extracted from the video.
-
-    """
-    fourcc = int(capture.get(cv2.CAP_PROP_FOURCC))
-    fps = int(capture.get(cv2.CAP_PROP_FPS))
-    height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
-    frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
-    return {"fourcc": fourcc, "fps": fps, "height": height, "width": width,
-            "frame_count": frame_count}
-
-
-def build_pyramid(image: np.ndarray, num_levels: int) -> list[np.ndarray]:
-    """Coverts image to a pyramid list of size num_levels.
-
-    First, create a list with the original image in it. Then, iterate over the
-    levels. In each level, convolve the PYRAMID_FILTER with the image from the
-    previous level. Then, decimate the result using indexing: simply pick
-    every second entry of the result.
-    Hint: Use signal.convolve2d with boundary='symm' and mode='same'.
-
-    Args:
-        image: np.ndarray. Input image.
-        num_levels: int. The number of blurring / decimation times.
-
-    Returns:
-        pyramid: list. A list of np.ndarray of images.
-
-    Note that the list length should be num_levels + 1 as the in first entry of
-    the pyramid is the original image.
-    You are not allowed to use cv2 PyrDown here (or any other cv2 method).
-    We use a slightly different decimation process from this function.
-    """
-    pyramid = [image.copy()]
-    for level in range(num_levels):
-        current_image = pyramid[level]
-        blurred = signal.convolve2d(current_image, PYRAMID_FILTER,
-                                    boundary='symm', mode='same')
-        decimated = blurred[::2, ::2]
-        pyramid.append(decimated)
-    return pyramid
-
-
-def lucas_kanade_step(I1: np.ndarray, I2: np.ndarray, window_size: int) -> tuple[np.ndarray, np.ndarray]:
-    """Basic Lucas-Kanade step implementation."""
-    w = window_size // 2
-    Ix = signal.convolve2d(I2, X_DERIVATIVE_FILTER, mode='same')
-    Iy = signal.convolve2d(I2, Y_DERIVATIVE_FILTER, mode='same')
-    It = I2 - I1
-
-    du = np.zeros_like(I1, dtype=np.float32)
-    dv = np.zeros_like(I1, dtype=np.float32)
-
-    for i in range(w, I1.shape[0] - w):
-        for j in range(w, I1.shape[1] - w):
-            Ix_window = Ix[i - w:i + w + 1, j - w:j + w + 1].flatten()
-            Iy_window = Iy[i - w:i + w + 1, j - w:j + w + 1].flatten()
-            It_window = It[i - w:i + w + 1, j - w:j + w + 1].flatten()
-
-            A = np.vstack((Ix_window, Iy_window)).T
-            b = -It_window
-
-            try:
-                flow = np.linalg.lstsq(A, b, rcond=None)[0]
-                du[i, j] = flow[0]
-                dv[i, j] = flow[1]
-            except:
-                pass
-
-    return du, dv
-
-
-def faster_lucas_kanade_step_optimized(I1: np.ndarray,
-                                       I2: np.ndarray,
-                                       window_size: int) -> tuple[np.ndarray, np.ndarray]:
-    """Optimized implementation of Lucas-Kanade Step.
-
-    Key optimizations:
-    1. Higher threshold for small images (increased from 6000 to 10000)
-    2. More aggressive corner filtering
-    3. No interpolation for very sparse corners
-    4. Higher corner detection threshold
-    """
-    # Increased threshold for using full LK
-    if I1.shape[0] * I1.shape[1] < 10000:
-        return lucas_kanade_step(I1, I2, window_size)
-
-    du = np.zeros_like(I1, dtype=np.float32)
-    dv = np.zeros_like(I1, dtype=np.float32)
-
-    # Corner detection with higher threshold
-    blockSize = 2
-    ksize = 3
-    k = 0.04
-    harris_response = cv2.cornerHarris(I2.astype(np.float32), blockSize, ksize, k)
-
-    # Higher threshold to get fewer but stronger corners
-    threshold = 0.1 * harris_response.max()  # Increased from 0.05
-    corners = np.argwhere(harris_response > threshold)
-
-    # Limit to fewer corners for faster processing
-    max_corners = 50  # Reduced from 100
-    if corners.shape[0] > max_corners:
-        strengths = harris_response[corners[:, 0], corners[:, 1]]
-        idx = np.argsort(strengths)[-max_corners:]
-        corners = corners[idx]
-
-    # If we have very few corners, just return sparse flow without interpolation
-    if corners.shape[0] < 10:
-        return du, dv
-
-    w = window_size // 2
-    Ix = signal.convolve2d(I2, X_DERIVATIVE_FILTER, mode='same')
-    Iy = signal.convolve2d(I2, Y_DERIVATIVE_FILTER, mode='same')
-    It = I2 - I1
-
-    # Process corners and directly update du, dv without interpolation
-    for i, j in corners:
-        if i < w or i >= I1.shape[0] - w or j < w or j >= I1.shape[1] - w:
-            continue
-
-        Ix_window = Ix[i - w:i + w + 1, j - w:j + w + 1].flatten()
-        Iy_window = Iy[i - w:i + w + 1, j - w:j + w + 1].flatten()
-        It_window = It[i - w:i + w + 1, j - w:j + w + 1].flatten()
-
-        A = np.vstack((Ix_window, Iy_window)).T
-        b = -It_window
-
-        try:
-            flow = np.linalg.lstsq(A, b, rcond=None)[0]
-            # Directly set the flow at corner locations
-            du[i, j] = flow[0]
-            dv[i, j] = flow[1]
-        except:
-            continue
-
-    # Simple dilation to spread corner flow to nearby pixels
-    kernel = np.ones((5, 5), np.float32) / 25
-    du = cv2.filter2D(du, -1, kernel)
-    dv = cv2.filter2D(dv, -1, kernel)
-
-    return du, dv
-
-
-def faster_lucas_kanade_optical_flow_optimized(
-        I1: np.ndarray, I2: np.ndarray, window_size: int, max_iter: int,
-        num_levels: int) -> tuple[np.ndarray, np.ndarray]:
-    """Optimized version with reduced iterations and faster warping."""
-    h_factor = int(np.ceil(I1.shape[0] / (2 ** num_levels)))
-    w_factor = int(np.ceil(I1.shape[1] / (2 ** num_levels)))
-    IMAGE_SIZE = (w_factor * (2 ** num_levels),
-                  h_factor * (2 ** num_levels))
-
-    if I1.shape != IMAGE_SIZE:
-        I1 = cv2.resize(I1, IMAGE_SIZE)
-    if I2.shape != IMAGE_SIZE:
-        I2 = cv2.resize(I2, IMAGE_SIZE)
-
-    pyramid_I1 = build_pyramid(I1, num_levels)
-    pyramid_I2 = build_pyramid(I2, num_levels)
-
-    u = np.zeros(pyramid_I2[-1].shape, dtype=np.float32)
-    v = np.zeros(pyramid_I2[-1].shape, dtype=np.float32)
-
-    for level in range(num_levels, -1, -1):
-        I1_level = pyramid_I1[level]
-        I2_level = pyramid_I2[level]
-
-        if level != num_levels:
-            u = cv2.resize(u, (I1_level.shape[1], I1_level.shape[0])) * 2
-            v = cv2.resize(v, (I1_level.shape[1], I1_level.shape[0])) * 2
-
-        # Reduce iterations for speed (especially at higher resolutions)
-        current_max_iter = max_iter if level > 1 else 1
-
-        for _ in range(current_max_iter):
-            # Create mesh grid for warping
-            h, w = I2_level.shape
-            y, x = np.mgrid[0:h, 0:w].astype(np.float32)
-
-            # Warp using cv2.remap which is faster than griddata
-            map_x = x + u
-            map_y = y + v
-            I2_warped = cv2.remap(I2_level, map_x, map_y, cv2.INTER_LINEAR)
-
-            du, dv = faster_lucas_kanade_step_optimized(I1_level, I2_warped, window_size)
-            u += du
-            v += dv
-
-    return u, v
-
-
-def extract_moving_objects_from_video_ultra_fast(input_video_path, output_video_path_extracted,
-                                                 binary_video_path, scale_factor=0.8, threshold=0.001):
-    """Ultra-fast version with frame downsampling and optimized processing.
-
-    Args:
-        input_video_path: Path to input video
-        output_video_path_extracted: Path for extracted moving objects video
-        binary_video_path: Path for binary mask video
-        scale_factor: Factor to downscale frames for processing (0.5 = half resolution)
-        threshold: Motion threshold
+        input_path (str): Path to input video file
+        binary_output_path (str): Path to save binary mask video (None to disable saving)
+        extracted_output_path (str): Path to save extracted foreground video (None to disable saving)
     """
 
-    cap = cv2.VideoCapture(input_video_path)
-    video_params = get_video_parameters(cap)
-
-    fourcc = cv2.VideoWriter_fourcc(*'XVID')
-
-    out_extracted = cv2.VideoWriter(output_video_path_extracted, fourcc, video_params["fps"],
-                                    (video_params["width"], video_params["height"]))
-
-    out_binary = cv2.VideoWriter(binary_video_path, fourcc, video_params["fps"],
-                                 (video_params["width"], video_params["height"]), isColor=False)
-
-    ret, prev_frame = cap.read()
-    if not ret:
-        print("Error: Could not read first frame")
-        cap.release()
+    # Check if input file exists
+    if not os.path.exists(input_path):
+        print(f"Error: Input file '{input_path}' not found!")
         return
 
-    prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
+    # Open video capture
+    cap = cv2.VideoCapture(input_path)
 
-    # Downscale for processing
-    prev_gray_small = cv2.resize(prev_gray, None, fx=scale_factor, fy=scale_factor)
+    if not cap.isOpened():
+        print(f"Error: Cannot open video file '{input_path}'")
+        return
 
-    out_extracted.write(prev_frame)
-    out_binary.write(np.zeros_like(prev_gray))
+    # Get video properties
+    fps = int(cap.get(cv2.CAP_PROP_FPS))
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    print(f"Video properties:")
+    print(f"  Resolution: {width}x{height}")
+    print(f"  FPS: {fps}")
+    print(f"  Total frames: {total_frames}")
+
+    # Create GMM background subtractor
+    backSub = cv2.createBackgroundSubtractorKNN(
+        history=200,  # Increase for more stable background model
+        dist2Threshold=220.0,  # Lower for more sensitive detection
+        detectShadows=True
+    )
+
+    # Setup video writers
+    binary_out = None
+    extracted_out = None
+
+    if binary_output_path:
+        # Create output directory if it doesn't exist
+        output_dir = os.path.dirname(binary_output_path)
+        if output_dir and not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+
+        # Binary video writer (grayscale)
+        fourcc = cv2.VideoWriter_fourcc(*'XVID')
+        binary_out = cv2.VideoWriter(binary_output_path, fourcc, fps, (width, height), isColor=False)
+        print(f"Binary output will be saved to: {binary_output_path}")
+
+    if extracted_output_path:
+        # Create output directory if it doesn't exist
+        output_dir = os.path.dirname(extracted_output_path)
+        if output_dir and not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+
+        # Extracted video writer (color)
+        fourcc = cv2.VideoWriter_fourcc(*'XVID')
+        extracted_out = cv2.VideoWriter(extracted_output_path, fourcc, fps, (width, height), isColor=True)
+        print(f"Extracted output will be saved to: {extracted_output_path}")
 
     frame_count = 0
-    total_frames = video_params["frame_count"]
 
-    print(f"Processing {total_frames} frames at {scale_factor * 100:.0f}% resolution...")
-
-    # Progress bar
-    pbar = tqdm(total=total_frames - 1)
+    print("Processing video...")
 
     while True:
-        ret, curr_frame = cap.read()
+        ret, frame = cap.read()
+
         if not ret:
             break
 
-        curr_gray = cv2.cvtColor(curr_frame, cv2.COLOR_BGR2GRAY)
-        curr_gray_small = cv2.resize(curr_gray, None, fx=scale_factor, fy=scale_factor)
-
-        # Use optimized optical flow on downscaled frames
-        u, v = faster_lucas_kanade_optical_flow_optimized(
-            prev_gray_small, curr_gray_small,
-            window_size=5, max_iter=5, num_levels=5  # Reduced iterations and levels
-        )
-
-        # Upscale flow to original resolution
-        u_full = cv2.resize(u, (video_params["width"], video_params["height"])) / scale_factor
-        v_full = cv2.resize(v, (video_params["width"], video_params["height"])) / scale_factor
-
-        flow_magnitude = np.sqrt(u_full ** 2 + v_full ** 2)
-        moving_mask = (flow_magnitude > threshold).astype(np.uint8) * 255
-        """
-        # Clean up mask with smaller kernel for speed
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        moving_mask_cleaned = cv2.morphologyEx(moving_mask, cv2.MORPH_CLOSE, kernel)"""
-
-        extracted_frame = curr_frame.copy()
-        extracted_frame[moving_mask == 0] = [0, 0, 0]
-
-        out_extracted.write(extracted_frame)
-        out_binary.write(moving_mask)
-
-        prev_gray_small = curr_gray_small
         frame_count += 1
-        pbar.update(1)
 
-    pbar.close()
+        # Apply GMM background subtraction
+        fgMask = backSub.apply(frame)
+
+        # Remove detected shadows from the mask
+        fgMask[fgMask == 127] = 0
+
+        # Noise reduction and morphological operations
+        kernel_small = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        kernel_medium = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+
+        # Remove small objects
+        fgMask = cv2.morphologyEx(fgMask, cv2.MORPH_OPEN, kernel_small, iterations=3)
+        # Fill holes in detected objects
+        fgMask = cv2.morphologyEx(fgMask, cv2.MORPH_CLOSE, kernel_medium, iterations=2)
+
+        # Find contours and filter by area
+        contours, _ = cv2.findContours(fgMask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        # Create clean mask
+        clean_mask = np.zeros_like(fgMask)
+        min_area = 1500  # Adjust based on your needs
+
+        for contour in contours:
+            if cv2.contourArea(contour) > min_area:
+                cv2.fillPoly(clean_mask, [contour], 255)
+
+        fgMask = clean_mask
+
+        # Create extracted foreground image
+        # Apply mask to original frame to extract only foreground objects
+        extracted_frame = cv2.bitwise_and(frame, frame, mask=fgMask)
+
+        # Optional: Set background to black or white
+        # For black background (current approach - already done by bitwise_and)
+        # For white background, uncomment the following lines:
+        # background = np.ones_like(frame) * 255
+        # background_mask = cv2.bitwise_not(fgMask)
+        # background = cv2.bitwise_and(background, background, mask=background_mask)
+        # extracted_frame = cv2.add(extracted_frame, background)
+
+        # Save frames
+        if binary_out is not None:
+            binary_out.write(fgMask)
+
+        if extracted_out is not None:
+            extracted_out.write(extracted_frame)
+
+        # Display progress
+        if frame_count % 30 == 0:  # Print every 30 frames
+            progress = (frame_count / total_frames) * 100
+            print(f"Progress: {progress:.1f}% ({frame_count}/{total_frames} frames)")
+
+        # Optional: Display the frames (uncomment to see real-time processing)
+        # Press 'q' to quit early
+        cv2.imshow('Original Frame', frame)
+        cv2.imshow('Binary Mask', fgMask)
+        cv2.imshow('Extracted Foreground', extracted_frame)
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            print("Processing interrupted by user")
+            break
+
+    # Cleanup
     cap.release()
-    out_extracted.release()
-    out_binary.release()
+    if binary_out is not None:
+        binary_out.release()
+    if extracted_out is not None:
+        extracted_out.release()
     cv2.destroyAllWindows()
 
-    print(f"Processing complete!")
-    print(f"Extracted objects saved to: {output_video_path_extracted}")
-    print(f"Binary mask video saved to: {binary_video_path}")
+    print(f"Processing completed! Processed {frame_count} frames.")
+    if binary_output_path and os.path.exists(binary_output_path):
+        print(f"Binary output saved to: {binary_output_path}")
+    if extracted_output_path and os.path.exists(extracted_output_path):
+        print(f"Extracted output saved to: {extracted_output_path}")
+
+
+def main():
+    # Define file paths
+    INPUT_VIDEO = r"C:\Users\zaita\Downloads\FinalProject\Outputs\background_locked.avi"
+    BINARY_OUTPUT = r"C:\Users\zaita\Downloads\FinalProject\Outputs\binary.avi"
+    EXTRACTED_OUTPUT = r"C:\Users\zaita\Downloads\FinalProject\Outputs\extracted.avi"
+
+    # Run background subtraction with dual output
+    gmm_background_subtraction(INPUT_VIDEO, BINARY_OUTPUT, EXTRACTED_OUTPUT)
+
+
+if __name__ == "__main__":
+    main()
