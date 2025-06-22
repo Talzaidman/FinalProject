@@ -235,7 +235,7 @@ def main():
         INPUT_VIDEO,
         BINARY_OUTPUT,
         EXTRACTED_OUTPUT,
-        num_training_passes=5  # Total number of training passes before inference
+        num_training_passes = 3  # Total number of training passes before inference-was 5 changed to 3 for testing
     )
 
 

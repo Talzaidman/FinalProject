@@ -1,15 +1,16 @@
 import cv2
 import numpy as np
+import os
 
 # Configuration parameters
-MAX_CORNERS = 200
-QUALITY_LEVEL = 0.1
-MIN_DISTANCE = 5
+MAX_CORNERS = 300
+QUALITY_LEVEL = 0.05
+MIN_DISTANCE = 3
 BLOCK_SIZE = 5
 RANSAC_THRESHOLD = 1.5
 MAX_ITERATIONS = 2000
-SMOOTHING_WINDOW = 2
-MIN_FEATURES_THRESHOLD = 150  # Minimum features to maintain before refreshing
+SMOOTHING_WINDOW = 5
+MIN_FEATURES_THRESHOLD = 50  # Minimum features to maintain before refreshing
 
 # Input and output file paths
 INPUT_VIDEO = r"C:\Users\zaita\Downloads\FinalProject\Inputs\INPUT.avi"
@@ -147,160 +148,577 @@ def apply_centering_to_transforms(transforms, offset_x, offset_y):
 
     return centered_transforms
 
+# stabilize_video() contains the stabilization process detailed below in a single function
+def stabilize_video(input_path, output_path):
+    """
+    Stabilize a video using feature-based tracking and absolute transformation.
+    
+    Args:
+        input_path (str): Path to input video file
+        output_path (str): Path to output stabilized video file
+    
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    
+    print(f"Starting video stabilization...")
+    print(f"Input: {input_path}")
+    print(f"Output: {output_path}")
+    
+    # Check if input file exists
+    if not os.path.exists(input_path):
+        print(f"Error: Input file '{input_path}' not found!")
+        return False
+    
+    # Create output directory if it doesn't exist
+    output_dir = os.path.dirname(output_path)
+    if output_dir and not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    
+    # Open input video
+    cap = cv2.VideoCapture(input_path)
+    if not cap.isOpened():
+        print(f"Error: Could not open video file '{input_path}'")
+        return False
 
-# Main stabilization process
-print("Starting absolute video stabilization with centering...")
+    # Get video properties
+    fps = int(cap.get(cv2.CAP_PROP_FPS))
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-# Open input video
-cap = cv2.VideoCapture(INPUT_VIDEO)
-if not cap.isOpened():
-    print(f"Error: Could not open video file '{INPUT_VIDEO}'")
-    exit(1)
+    print(f"Video properties: {width}x{height}, {fps} fps, {total_frames} frames")
 
-# Get video properties
-fps = int(cap.get(cv2.CAP_PROP_FPS))
-width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    # Setup video writer
+    fourcc = cv2.VideoWriter_fourcc(*'XVID')
+    out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+    
+    if not out.isOpened():
+        print(f"Error: Could not create output video writer")
+        cap.release()
+        return False
 
-print(f"Video properties: {width}x{height}, {fps} fps, {total_frames} frames")
+    # Initialize variables for first pass
+    reference_gray = None
+    reference_features = None
+    absolute_transforms = []  # Direct transformations from reference frame
+    frame_count = 0
+    features_refreshed_count = 0
 
-# Setup video writer
-fourcc = cv2.VideoWriter_fourcc(*'XVID')
-out = cv2.VideoWriter(OUTPUT_VIDEO, fourcc, fps, (width, height))
+    print("First pass: Computing absolute transformations from reference frame...")
 
-# Initialize variables for first pass
-reference_gray = None
-reference_features = None
-absolute_transforms = []  # Direct transformations from reference frame
-frame_count = 0
-features_refreshed_count = 0
+    # First pass: Extract absolute transformations from reference frame
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
 
-print("First pass: Computing absolute transformations from reference frame...")
+        # Convert to grayscale
+        curr_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-# First pass: Extract absolute transformations from reference frame
-while True:
-    ret, frame = cap.read()
-    if not ret:
-        break
-
-    # Convert to grayscale
-    curr_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-    if reference_gray is None:
-        # First frame - set as reference
-        reference_gray = curr_gray.copy()
-        reference_features = detect_features(reference_gray)
-        absolute_transforms.append(np.eye(2, 3, dtype=np.float32))  # Identity for first frame
-        print(f"Reference frame set with {len(reference_features) if reference_features is not None else 0} features")
-    else:
-        # Track features directly from reference frame to current frame
-        good_ref, good_curr = track_features_from_reference(reference_gray, curr_gray, reference_features)
-
-        if good_ref is not None and len(good_ref) >= MIN_FEATURES_THRESHOLD:
-            # Estimate transformation directly from reference frame to current frame
-            transform = estimate_transformation(good_ref, good_curr)
-            absolute_transforms.append(transform)
+        if reference_gray is None:
+            # First frame - set as reference
+            reference_gray = curr_gray.copy()
+            reference_features = detect_features(reference_gray)
+            absolute_transforms.append(np.eye(2, 3, dtype=np.float32))  # Identity for first frame
+            print(f"Reference frame set with {len(reference_features) if reference_features is not None else 0} features")
         else:
-            # Not enough features - try to refresh feature set
-            print(
-                f"Frame {frame_count}: Only {len(good_ref) if good_ref is not None else 0} features tracked, refreshing...")
+            # Track features directly from reference frame to current frame
+            good_ref, good_curr = track_features_from_reference(reference_gray, curr_gray, reference_features)
 
-            # Use previous transform if available, otherwise identity
-            if len(absolute_transforms) > 0:
-                absolute_transforms.append(absolute_transforms[-1])  # Use previous transform
+            if good_ref is not None and len(good_ref) >= MIN_FEATURES_THRESHOLD:
+                # Estimate transformation directly from reference frame to current frame
+                transform = estimate_transformation(good_ref, good_curr)
+                absolute_transforms.append(transform)
             else:
-                absolute_transforms.append(np.eye(2, 3, dtype=np.float32))
+                # Not enough features - try to refresh feature set
+                print(f"Frame {frame_count}: Only {len(good_ref) if good_ref is not None else 0} features tracked, refreshing...")
 
-            # Refresh reference features for better tracking
-            new_features = detect_features(curr_gray)
-            if new_features is not None and len(new_features) > len(
-                    reference_features) if reference_features is not None else True:
-                # Warp new features back to reference frame coordinate system
-                try:
-                    if len(absolute_transforms) > 1:
-                        inv_transform = np.linalg.inv(np.vstack([absolute_transforms[-1], [0, 0, 1]]))[:2, :]
-                        reference_features = cv2.transform(new_features.reshape(-1, 1, 2),
-                                                           np.vstack([inv_transform, [0, 0, 1]])).reshape(-1, 1, 2)
-                    else:
-                        reference_features = new_features
-                    features_refreshed_count += 1
-                except:
-                    # If transformation fails, keep old features
-                    pass
+                # Use previous transform if available, otherwise identity
+                if len(absolute_transforms) > 0:
+                    absolute_transforms.append(absolute_transforms[-1])  # Use previous transform
+                else:
+                    absolute_transforms.append(np.eye(2, 3, dtype=np.float32))
 
-    frame_count += 1
-    if frame_count % 50 == 0:
-        print(f"Analyzed {frame_count}/{total_frames} frames")
+                # Refresh reference features for better tracking
+                new_features = detect_features(curr_gray)
+                if new_features is not None and len(new_features) > len(reference_features) if reference_features is not None else True:
+                    # Warp new features back to reference frame coordinate system
+                    try:
+                        if len(absolute_transforms) > 1:
+                            inv_transform = np.linalg.inv(np.vstack([absolute_transforms[-1], [0, 0, 1]]))[:2, :]
+                            reference_features = cv2.transform(new_features.reshape(-1, 1, 2),
+                                                             np.vstack([inv_transform, [0, 0, 1]])).reshape(-1, 1, 2)
+                        else:
+                            reference_features = new_features
+                        features_refreshed_count += 1
+                    except:
+                        # If transformation fails, keep old features
+                        pass
 
-print(f"Features were refreshed {features_refreshed_count} times during tracking")
-print("Smoothing absolute transformations...")
+        frame_count += 1
+        if frame_count % 50 == 0:
+            print(f"Analyzed {frame_count}/{total_frames} frames")
 
-# Smooth the absolute transformations
-smoothed_absolute_transforms = smooth_transformations(absolute_transforms, SMOOTHING_WINDOW)
+    print(f"Features were refreshed {features_refreshed_count} times during tracking")
+    print("Smoothing absolute transformations...")
 
-# Calculate centering offset to center the average of all transformed frames
-print("Calculating centering offset...")
-offset_x, offset_y = calculate_centering_offset(smoothed_absolute_transforms, width, height)
+    # Smooth the absolute transformations
+    smoothed_absolute_transforms = smooth_transformations(absolute_transforms, SMOOTHING_WINDOW)
 
-# Apply centering offset to all transforms
-print("Applying centering offset to transformations...")
-centered_transforms = apply_centering_to_transforms(smoothed_absolute_transforms, offset_x, offset_y)
+    # Calculate centering offset to center the average of all transformed frames
+    print("Calculating centering offset...")
+    offset_x, offset_y = calculate_centering_offset(smoothed_absolute_transforms, width, height)
 
-# Reset video capture for second pass
-cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-frame_count = 0
+    # Apply centering offset to all transforms
+    print("Applying centering offset to transformations...")
+    centered_transforms = apply_centering_to_transforms(smoothed_absolute_transforms, offset_x, offset_y)
 
-print("Second pass: Applying centered absolute stabilization...")
+    # Reset video capture for second pass
+    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    frame_count = 0
 
-# Second pass: Apply centered absolute stabilization
-while True:
-    ret, frame = cap.read()
-    if not ret:
-        break
+    print("Second pass: Applying centered absolute stabilization...")
 
-    if frame_count == 0:
-        # First frame - apply centering offset
-        centering_transform = np.array([[1, 0, offset_x], [0, 1, offset_y]], dtype=np.float32)
-        stabilized_frame = cv2.warpAffine(frame, centering_transform, (width, height),
-                                          borderMode=cv2.BORDER_CONSTANT, borderValue=0)
-    elif frame_count < len(centered_transforms):
-        # Get the centered absolute transformation
-        absolute_transform = centered_transforms[frame_count]
+    # Second pass: Apply centered absolute stabilization
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
 
-        # Apply inverse transformation to warp current frame back to reference frame
-        try:
-            # Create 3x3 matrix for inversion
-            full_transform = np.vstack([absolute_transform, [0, 0, 1]])
-            inv_transform = np.linalg.inv(full_transform)[:2, :]
-
-            # Apply transformation to align frame with reference frame
-            stabilized_frame = cv2.warpAffine(frame, inv_transform, (width, height),
-                                              borderMode=cv2.BORDER_CONSTANT, borderValue=0)
-        except np.linalg.LinAlgError:
-            # If inversion fails, use original frame with centering
+        if frame_count == 0:
+            # First frame - apply centering offset
             centering_transform = np.array([[1, 0, offset_x], [0, 1, offset_y]], dtype=np.float32)
             stabilized_frame = cv2.warpAffine(frame, centering_transform, (width, height),
                                               borderMode=cv2.BORDER_CONSTANT, borderValue=0)
-            print(f"Warning: Transform inversion failed for frame {frame_count}")
-    else:
-        # Apply centering to any remaining frames
-        centering_transform = np.array([[1, 0, offset_x], [0, 1, offset_y]], dtype=np.float32)
-        stabilized_frame = cv2.warpAffine(frame, centering_transform, (width, height),
-                                          borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        elif frame_count < len(centered_transforms):
+            # Get the centered absolute transformation
+            absolute_transform = centered_transforms[frame_count]
 
-    # Write stabilized frame
-    out.write(stabilized_frame)
+            # Apply inverse transformation to warp current frame back to reference frame
+            try:
+                # Create 3x3 matrix for inversion
+                full_transform = np.vstack([absolute_transform, [0, 0, 1]])
+                inv_transform = np.linalg.inv(full_transform)[:2, :]
 
-    frame_count += 1
-    if frame_count % 50 == 0:
-        print(f"Stabilized {frame_count}/{total_frames} frames")
+                # Apply transformation to align frame with reference frame
+                stabilized_frame = cv2.warpAffine(frame, inv_transform, (width, height),
+                                                  borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+            except np.linalg.LinAlgError:
+                # If inversion fails, use original frame with centering
+                centering_transform = np.array([[1, 0, offset_x], [0, 1, offset_y]], dtype=np.float32)
+                stabilized_frame = cv2.warpAffine(frame, centering_transform, (width, height),
+                                                  borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+                print(f"Warning: Transform inversion failed for frame {frame_count}")
+        else:
+            # Apply centering to any remaining frames
+            centering_transform = np.array([[1, 0, offset_x], [0, 1, offset_y]], dtype=np.float32)
+            stabilized_frame = cv2.warpAffine(frame, centering_transform, (width, height),
+                                              borderMode=cv2.BORDER_CONSTANT, borderValue=0)
 
-# Cleanup
-cap.release()
-out.release()
+        # Write stabilized frame
+        out.write(stabilized_frame)
 
-print(f"Centered absolute video stabilization completed!")
-print(f"Stabilized video saved as: {OUTPUT_VIDEO}")
-print(f"All {len(absolute_transforms)} frames aligned to reference frame and centered")
-print("Video is now centered - the average position of all stabilized frames is at the center")
+        frame_count += 1
+        if frame_count % 50 == 0:
+            print(f"Stabilized {frame_count}/{total_frames} frames")
+
+    # Cleanup
+    cap.release()
+    out.release()
+
+    print(f"Centered absolute video stabilization completed!")
+    print(f"Stabilized video saved as: {output_path}")
+    print(f"All {len(absolute_transforms)} frames aligned to reference frame and centered")
+    print("Video is now centered - the average position of all stabilized frames is at the center")
+    
+    return True
+
+# Try a different stabilization approach
+def stabilize_video2(input_path, output_path):
+    """
+    Stabilize video using the course's suggested approach:
+    Frame-to-frame feature matching with RANSAC transformation estimation.
+    
+    Args:
+        input_path (str): Path to input video file
+        output_path (str): Path to output stabilized video file
+    
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    
+    print(f"Starting video stabilization (Course Approach)...")
+    print(f"Input: {input_path}")
+    print(f"Output: {output_path}")
+    
+    # Check if input file exists
+    if not os.path.exists(input_path):
+        print(f"Error: Input file '{input_path}' not found!")
+        return False
+    
+    # Create output directory if it doesn't exist
+    output_dir = os.path.dirname(output_path)
+    if output_dir and not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    
+    # Open input video
+    cap = cv2.VideoCapture(input_path)
+    if not cap.isOpened():
+        print(f"Error: Could not open video file '{input_path}'")
+        return False
+
+    # Get video properties
+    fps = int(cap.get(cv2.CAP_PROP_FPS))
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    print(f"Video properties: {width}x{height}, {fps} fps, {total_frames} frames")
+
+    # Setup video writer
+    fourcc = cv2.VideoWriter_fourcc(*'XVID')
+    out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+    
+    if not out.isOpened():
+        print(f"Error: Could not create output video writer")
+        cap.release()
+        return False
+
+    # Feature detection parameters
+    feature_params = dict(
+        maxCorners=300,
+        qualityLevel=0.05,
+        minDistance=3,
+        blockSize=7
+    )
+
+    # Lucas-Kanade optical flow parameters
+    lk_params = dict(
+        winSize=(15, 15),
+        maxLevel=2,
+        criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 20, 0.01)
+    )
+
+    # Variables for stabilization
+    prev_gray = None
+    cumulative_transform = np.eye(3, dtype=np.float32)  # Cumulative transformation
+    transforms = []  # Store all transformations for smoothing
+    frame_count = 0
+    
+    print("Processing video frames...")
+
+    # First pass: Calculate frame-to-frame transformations
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        # Convert to grayscale
+        curr_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+        if prev_gray is not None:
+            # 1. Find features in previous frame
+            prev_features = cv2.goodFeaturesToTrack(prev_gray, mask=None, **feature_params)
+            
+            if prev_features is not None and len(prev_features) > 10:
+                # 2. Track features to current frame using optical flow
+                curr_features, status, error = cv2.calcOpticalFlowPyrLK(
+                    prev_gray, curr_gray, prev_features, None, **lk_params
+                )
+                
+                # 3. Filter good matches
+                good_prev = prev_features[status == 1]
+                good_curr = curr_features[status == 1]
+                
+                if len(good_prev) >= 5:  # Need at least 5 points for transformation
+                    # 4. Estimate transformation using RANSAC
+                    # Using estimateAffinePartial2D for rigid transformation (translation + rotation + uniform scale)
+                    transform_matrix, inliers = cv2.estimateAffinePartial2D(
+                        good_prev, good_curr,
+                        method=cv2.RANSAC,
+                        ransacReprojThreshold=1.0,
+                        maxIters=1000,
+                        confidence=0.995
+                    )
+                    
+                    if transform_matrix is not None:
+                        # Convert 2x3 matrix to 3x3 for easier manipulation
+                        transform_3x3 = np.vstack([transform_matrix, [0, 0, 1]])
+                        transforms.append(transform_3x3)
+                        
+                        # Debug info
+                        dx = transform_matrix[0, 2]
+                        dy = transform_matrix[1, 2]
+                        da = np.arctan2(transform_matrix[1, 0], transform_matrix[0, 0])
+                        
+                        if frame_count % 30 == 0:  # Print every 30 frames
+                            print(f"Frame {frame_count}: Features: {len(good_prev)}, "
+                                  f"Transform: dx={dx:.1f}, dy={dy:.1f}, angle={np.degrees(da):.1f}°")
+                    else:
+                        # No good transformation found, use identity
+                        transforms.append(np.eye(3, dtype=np.float32))
+                        if frame_count % 30 == 0:
+                            print(f"Frame {frame_count}: No good transformation found")
+                else:
+                    # Not enough features, use identity transformation
+                    transforms.append(np.eye(3, dtype=np.float32))
+                    if frame_count % 30 == 0:
+                        print(f"Frame {frame_count}: Only {len(good_prev)} features - insufficient")
+            else:
+                # No features detected, use identity
+                transforms.append(np.eye(3, dtype=np.float32))
+                if frame_count % 30 == 0:
+                    print(f"Frame {frame_count}: No features detected")
+        else:
+            # First frame - identity transformation
+            transforms.append(np.eye(3, dtype=np.float32))
+            print(f"Frame {frame_count}: First frame (reference)")
+
+        prev_gray = curr_gray.copy()
+        frame_count += 1
+
+    print(f"Calculated {len(transforms)} transformations")
+
+    # Smooth transformations using moving average
+    print("Smoothing transformations...")
+    window_size = min(5, len(transforms))  # Use smaller window if video is short
+    smoothed_transforms = []
+    
+    for i in range(len(transforms)):
+        # Define smoothing window
+        start_idx = max(0, i - window_size // 2)
+        end_idx = min(len(transforms), i + window_size // 2 + 1)
+        
+        # Calculate average transformation in window
+        window_transforms = transforms[start_idx:end_idx]
+        
+        # Average translation and rotation components separately
+        avg_dx = np.mean([t[0, 2] for t in window_transforms])
+        avg_dy = np.mean([t[1, 2] for t in window_transforms])
+        avg_rot = np.mean([np.arctan2(t[1, 0], t[0, 0]) for t in window_transforms])
+        avg_scale = np.mean([np.sqrt(t[0, 0]**2 + t[1, 0]**2) for t in window_transforms])
+        
+        # Reconstruct smoothed transformation matrix
+        smoothed_transform = np.array([
+            [avg_scale * np.cos(avg_rot), -avg_scale * np.sin(avg_rot), avg_dx],
+            [avg_scale * np.sin(avg_rot), avg_scale * np.cos(avg_rot), avg_dy],
+            [0, 0, 1]
+        ], dtype=np.float32)
+        
+        smoothed_transforms.append(smoothed_transform)
+
+    # Second pass: Apply smoothed transformations
+    print("Applying stabilization...")
+    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)  # Reset to beginning
+    frame_count = 0
+    cumulative_transform = np.eye(3, dtype=np.float32)
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        if frame_count == 0:
+            # First frame - no transformation needed
+            stabilized_frame = frame.copy()
+        else:
+            # Apply cumulative transformation
+            if frame_count < len(smoothed_transforms):
+                # Get transformation from previous frame to current
+                frame_transform = smoothed_transforms[frame_count]
+                
+                # Invert the transformation to stabilize
+                try:
+                    inv_transform = np.linalg.inv(frame_transform)
+                    cumulative_transform = cumulative_transform @ inv_transform
+                    
+                    # Apply cumulative transformation (only the 2x3 part for warpAffine)
+                    transform_2x3 = cumulative_transform[:2, :]
+                    stabilized_frame = cv2.warpAffine(
+                        frame, transform_2x3, (width, height),
+                        borderMode=cv2.BORDER_CONSTANT,
+                        borderValue=0
+                    )
+                except np.linalg.LinAlgError:
+                    # If matrix inversion fails, use original frame
+                    stabilized_frame = frame.copy()
+                    print(f"Warning: Matrix inversion failed for frame {frame_count}")
+            else:
+                stabilized_frame = frame.copy()
+
+        # Write stabilized frame
+        out.write(stabilized_frame)
+        
+        frame_count += 1
+        if frame_count % 50 == 0:
+            print(f"Stabilized {frame_count}/{total_frames} frames")
+
+    # Cleanup
+    cap.release()
+    out.release()
+
+    print(f"Frame-to-frame video stabilization completed!")
+    print(f"Stabilized video saved as: {output_path}")
+    print(f"Processed {frame_count} frames with smoothed transformations")
+    
+    return True
+
+# Original code Tal ran. Delete later
+if __name__ == "__main__":
+    # Main stabilization process
+    print("Starting absolute video stabilization with centering...")
+
+    # Open input video
+    cap = cv2.VideoCapture(INPUT_VIDEO)
+    if not cap.isOpened():
+        print(f"Error: Could not open video file '{INPUT_VIDEO}'")
+        exit(1)
+
+    # Get video properties
+    fps = int(cap.get(cv2.CAP_PROP_FPS))
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    print(f"Video properties: {width}x{height}, {fps} fps, {total_frames} frames")
+
+    # Setup video writer
+    fourcc = cv2.VideoWriter_fourcc(*'XVID')
+    out = cv2.VideoWriter(OUTPUT_VIDEO, fourcc, fps, (width, height))
+
+    # Initialize variables for first pass
+    reference_gray = None
+    reference_features = None
+    absolute_transforms = []  # Direct transformations from reference frame
+    frame_count = 0
+    features_refreshed_count = 0
+
+    print("First pass: Computing absolute transformations from reference frame...")
+
+    # First pass: Extract absolute transformations from reference frame
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        # Convert to grayscale
+        curr_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+        if reference_gray is None:
+            # First frame - set as reference
+            reference_gray = curr_gray.copy()
+            reference_features = detect_features(reference_gray)
+            absolute_transforms.append(np.eye(2, 3, dtype=np.float32))  # Identity for first frame
+            print(f"Reference frame set with {len(reference_features) if reference_features is not None else 0} features")
+        else:
+            # Track features directly from reference frame to current frame
+            good_ref, good_curr = track_features_from_reference(reference_gray, curr_gray, reference_features)
+
+            if good_ref is not None and len(good_ref) >= MIN_FEATURES_THRESHOLD:
+                # Estimate transformation directly from reference frame to current frame
+                transform = estimate_transformation(good_ref, good_curr)
+                absolute_transforms.append(transform)
+            else:
+                # Not enough features - try to refresh feature set
+                print(
+                    f"Frame {frame_count}: Only {len(good_ref) if good_ref is not None else 0} features tracked, refreshing...")
+
+                # Use previous transform if available, otherwise identity
+                if len(absolute_transforms) > 0:
+                    absolute_transforms.append(absolute_transforms[-1])  # Use previous transform
+                else:
+                    absolute_transforms.append(np.eye(2, 3, dtype=np.float32))
+
+                # Refresh reference features for better tracking
+                new_features = detect_features(curr_gray)
+                if new_features is not None and len(new_features) > len(
+                        reference_features) if reference_features is not None else True:
+                    # Warp new features back to reference frame coordinate system
+                    try:
+                        if len(absolute_transforms) > 1:
+                            inv_transform = np.linalg.inv(np.vstack([absolute_transforms[-1], [0, 0, 1]]))[:2, :]
+                            reference_features = cv2.transform(new_features.reshape(-1, 1, 2),
+                                                            np.vstack([inv_transform, [0, 0, 1]])).reshape(-1, 1, 2)
+                        else:
+                            reference_features = new_features
+                        features_refreshed_count += 1
+                    except:
+                        # If transformation fails, keep old features
+                        pass
+
+        frame_count += 1
+        if frame_count % 50 == 0:
+            print(f"Analyzed {frame_count}/{total_frames} frames")
+
+    print(f"Features were refreshed {features_refreshed_count} times during tracking")
+    print("Smoothing absolute transformations...")
+
+    # Smooth the absolute transformations
+    smoothed_absolute_transforms = smooth_transformations(absolute_transforms, SMOOTHING_WINDOW)
+
+    # Calculate centering offset to center the average of all transformed frames
+    print("Calculating centering offset...")
+    offset_x, offset_y = calculate_centering_offset(smoothed_absolute_transforms, width, height)
+
+    # Apply centering offset to all transforms
+    print("Applying centering offset to transformations...")
+    centered_transforms = apply_centering_to_transforms(smoothed_absolute_transforms, offset_x, offset_y)
+
+    # Reset video capture for second pass
+    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    frame_count = 0
+
+    print("Second pass: Applying centered absolute stabilization...")
+
+    # Second pass: Apply centered absolute stabilization
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        if frame_count == 0:
+            # First frame - apply centering offset
+            centering_transform = np.array([[1, 0, offset_x], [0, 1, offset_y]], dtype=np.float32)
+            stabilized_frame = cv2.warpAffine(frame, centering_transform, (width, height),
+                                            borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        elif frame_count < len(centered_transforms):
+            # Get the centered absolute transformation
+            absolute_transform = centered_transforms[frame_count]
+
+            # Apply inverse transformation to warp current frame back to reference frame
+            try:
+                # Create 3x3 matrix for inversion
+                full_transform = np.vstack([absolute_transform, [0, 0, 1]])
+                inv_transform = np.linalg.inv(full_transform)[:2, :]
+
+                # Apply transformation to align frame with reference frame
+                stabilized_frame = cv2.warpAffine(frame, inv_transform, (width, height),
+                                                borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+            except np.linalg.LinAlgError:
+                # If inversion fails, use original frame with centering
+                centering_transform = np.array([[1, 0, offset_x], [0, 1, offset_y]], dtype=np.float32)
+                stabilized_frame = cv2.warpAffine(frame, centering_transform, (width, height),
+                                                borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+                print(f"Warning: Transform inversion failed for frame {frame_count}")
+        else:
+            # Apply centering to any remaining frames
+            centering_transform = np.array([[1, 0, offset_x], [0, 1, offset_y]], dtype=np.float32)
+            stabilized_frame = cv2.warpAffine(frame, centering_transform, (width, height),
+                                            borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+
+        # Write stabilized frame
+        out.write(stabilized_frame)
+
+        frame_count += 1
+        if frame_count % 50 == 0:
+            print(f"Stabilized {frame_count}/{total_frames} frames")
+
+    # Cleanup
+    cap.release()
+    out.release()
+
+    print(f"Centered absolute video stabilization completed!")
+    print(f"Stabilized video saved as: {OUTPUT_VIDEO}")
+    print(f"All {len(absolute_transforms)} frames aligned to reference frame and centered")
+    print("Video is now centered - the average position of all stabilized frames is at the center")
