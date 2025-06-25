@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+import os
 
 # Configuration parameters
 MAX_CORNERS = 200
@@ -12,8 +13,10 @@ SMOOTHING_WINDOW = 2
 MIN_FEATURES_THRESHOLD = 150  # Minimum features to maintain before refreshing
 
 # Input and output file paths
-INPUT_VIDEO = r"C:\Users\zaita\Downloads\FinalProject\Inputs\INPUT.avi"
-OUTPUT_VIDEO = r"C:\Users\zaita\Downloads\FinalProject\Outputs\stabilize.avi"
+wrkdir = os.getcwd()
+wrkdir = os.path.dirname(wrkdir)
+INPUT_VIDEO = fr"{wrkdir}\Inputs\INPUT.avi"
+OUTPUT_VIDEO = fr"{wrkdir}\Outputs\stabilize.avi"
 
 # Parameters for Lucas-Kanade optical flow
 lk_params = dict(winSize=(15, 15),

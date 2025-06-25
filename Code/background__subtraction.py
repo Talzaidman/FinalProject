@@ -224,9 +224,10 @@ def gmm_background_subtraction_multi_pass(input_path, binary_output_path=None,
 
 def main():
     # Define file paths
-    INPUT_VIDEO = r"C:\Users\zaita\Downloads\FinalProject\Outputs\background_locked.avi"
-    BINARY_OUTPUT = r"C:\Users\zaita\Downloads\FinalProject\Outputs\binary.avi"
-    EXTRACTED_OUTPUT = r"C:\Users\zaita\Downloads\FinalProject\Outputs\extracted.avi"
+    wrkdir = os.getcwd()
+    INPUT_VIDEO = fr"{wrkdir}\Outputs\background_locked.avi"
+    BINARY_OUTPUT = fr"{wrkdir}\Outputs\binary.avi"
+    EXTRACTED_OUTPUT = fr"{wrkdir}\Outputs\extracted.avi"
 
     # Run background subtraction with multiple training passes
     # Odd passes (1,3,5...) = normal direction
