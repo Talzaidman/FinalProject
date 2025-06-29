@@ -1,4 +1,4 @@
-from background__subtraction import gmm_background_subtraction_multi_pass
+from background__subtraction import enhanced_background_subtraction_with_postprocessing
 # from stabilize import lucas_kanade_faster_video_stabilization
 from temp_stieb import background_lock_stabilization
 import tracking
@@ -25,16 +25,16 @@ if __name__ == "__main__":
                                         WINDOW_SIZE_TAU,
                                         MAX_ITER_TAU,
                                         NUM_LEVELS_TAU)"""
-    background_lock_stabilization(rf"{wrkdir}\Inputs\INPUT.avi",
+    """background_lock_stabilization(rf"{wrkdir}\Inputs\INPUT.avi",
                                             rf"{wrkdir}\Outputs\stabilize.avi" # Stabilization threshold
-                                            )
+                                            )"""
 
     INPUT_VIDEO = rf"{wrkdir}\Outputs\background_locked.avi"
     BINARY_OUTPUT = rf"{wrkdir}\Outputs\binary.avi"
     EXTRACTED_OUTPUT = rf"{wrkdir}\Outputs\extracted.avi"
 
     # Run background subtraction with flipped training
-    gmm_background_subtraction_multi_pass(
+    enhanced_background_subtraction_with_postprocessing(
         INPUT_VIDEO,
         BINARY_OUTPUT,
         EXTRACTED_OUTPUT,
