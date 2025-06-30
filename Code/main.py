@@ -1,5 +1,6 @@
 # Imports
-from background__subtraction import gmm_background_subtraction_multi_pass
+from background__subtraction import gmm_background_subtraction_multi_pass, median_background_subtraction, fixed_median_background_subtraction, running_average_background_subtraction, smart_median_background_subtraction, multipass_median_background_subtraction
+
 # from stabilize import lucas_kanade_faster_video_stabilization  # Tal's comment
 from stabilize import stabilize_video, stabilize_video2
 import tracking
@@ -43,7 +44,8 @@ TRACKING_JSON = os.path.join(OUTPUTS_DIR, 'tracking.json')
 if __name__ == "__main__":
     print("start")
     
-       # Test Stabilization
+    """
+    # Test Stabilization
     print("\n" + "="*50)
     print("TESTING: VIDEO STABILIZATION")
     print("="*50)
@@ -66,7 +68,63 @@ if __name__ == "__main__":
     else:
         print(f"❌ Stabilization failed!")
     
+        elapsed = time.time() - start_time
+    print(f"✅ Stabilization completed in {elapsed:.2f} seconds!")
+    """
 
+    # Step 2: Background Subtraction
+    print("\n" + "="*50)
+    print("STEP 2: BACKGROUND SUBTRACTION")
+    print("="*50)
+    
+    # Check if stabilized video exists
+    if not os.path.exists(STABILIZED_VIDEO):
+        print(f"❌ Stabilized video not found: {STABILIZED_VIDEO}")
+        exit(1)
+    
+    print("Starting background subtraction on stabilized video...")
+    start_time = time.time()
+    
+    multipass_median_background_subtraction(
+    STABILIZED_VIDEO,
+    BINARY_VIDEO,
+    EXTRACTED_VIDEO
+    )
+
+    """"
+    running_average_background_subtraction(
+    STABILIZED_VIDEO,
+    BINARY_VIDEO,
+    EXTRACTED_VIDEO
+    )
+    """
+    """""
+    fixed_median_background_subtraction(
+    STABILIZED_VIDEO,
+    BINARY_VIDEO,
+    EXTRACTED_VIDEO
+    )
+    """
+
+    """"
+    gmm_background_subtraction_multi_pass(
+        STABILIZED_VIDEO,        # Use stabilized video as input
+        BINARY_VIDEO,
+        EXTRACTED_VIDEO,
+        num_training_passes = 3    # You can adjust this
+    )
+    """
+
+    elapsed = time.time() - start_time
+    print(f"✅ Background subtraction completed in {elapsed:.2f} seconds!")
+    
+    # Check outputs
+    if os.path.exists(BINARY_VIDEO):
+        print(f"✅ Binary video created: {BINARY_VIDEO}")
+    if os.path.exists(EXTRACTED_VIDEO):
+        print(f"✅ Extracted video created: {EXTRACTED_VIDEO}")
+
+    # Tal's comments
     """lucas_kanade_faster_video_stabilization(
         INPUT_VIDEO,
         STABILIZED_VIDEO,
