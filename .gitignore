@@ -1,17 +1,9 @@
 /.venv
 /.idea/.gitignore
-/Outputs/alpha.avi
-/Outputs/background_locked.avi
-/Outputs/binary.avi
-/Outputs/extracted.avi
 /.idea/FinalProject.iml
-/Outputs/matted.avi
 /.idea/misc.xml
 /.idea/modules.xml
 /.idea/inspectionProfiles/profiles_settings.xml
 /.idea/inspectionProfiles/Project_Default.xml
-/Outputs/stabilize.avi
-/Outputs/Stabilized_Example_INPUT.avi
 /Code/temp_stieb.py
-/Outputs/ultra_stable.avi
 /.idea/vcs.xml
