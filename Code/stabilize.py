@@ -3,12 +3,13 @@ import numpy as np
 import os
 
 # Configuration parameters
-MAX_CORNERS = 300
-QUALITY_LEVEL = 0.05
-MIN_DISTANCE = 3
-BLOCK_SIZE = 5
-RANSAC_THRESHOLD = 1.5
-MAX_ITERATIONS = 2000
+MAX_CORNERS = 500
+QUALITY_LEVEL = 0.03
+MIN_DISTANCE = 2
+BLOCK_SIZE = 7
+RANSAC_THRESHOLD = 0.8
+MAX_ITERATIONS = 5000
+CONFIDENCE = 0.995
 SMOOTHING_WINDOW = 5
 MIN_FEATURES_THRESHOLD = 50  # Minimum features to maintain before refreshing
 
@@ -17,9 +18,12 @@ INPUT_VIDEO = r"C:\Users\zaita\Downloads\FinalProject\Inputs\INPUT.avi"
 OUTPUT_VIDEO = r"C:\Users\zaita\Downloads\FinalProject\Outputs\stabilize.avi"
 
 # Parameters for Lucas-Kanade optical flow
-lk_params = dict(winSize=(15, 15),
-                 maxLevel=3,
-                 criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03))
+lk_params = dict(winSize=(21, 21),
+                 maxLevel=4,
+                 criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01),
+                flags=cv2.OPTFLOW_LK_GET_MIN_EIGENVALS,  # Add for quality control
+                minEigThreshold=1e-4,  # Filter out poor tracking windows
+                )
 
 # Parameters for feature detection
 feature_params = dict(maxCorners=MAX_CORNERS,
