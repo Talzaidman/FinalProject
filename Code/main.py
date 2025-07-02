@@ -38,7 +38,7 @@ if __name__ == "__main__":
         INPUT_VIDEO,
         BINARY_OUTPUT,
         EXTRACTED_OUTPUT,
-        num_training_passes=5  # Total number of training passes before inference
+        num_training_passes=3  # Total number of training passes before inference
     )
     # Define file paths
     background_path = fr"{wrkdir}\Inputs\background.jpg"

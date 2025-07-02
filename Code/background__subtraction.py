@@ -224,7 +224,7 @@ class ContourTracker:
 
 def enhanced_background_subtraction_with_postprocessing(input_path, binary_output_path=None,
                                                         extracted_output_path=None,
-                                                        num_training_passes=5):
+                                                        num_training_passes=1):
     """
     Enhanced GMM background subtraction with intelligent post-processing
     Uses temporal consistency, optical flow, SSIM, and edge density analysis
@@ -256,7 +256,7 @@ def enhanced_background_subtraction_with_postprocessing(input_path, binary_outpu
     # Create GMM background subtractor
     backSub = cv2.createBackgroundSubtractorKNN(
         history=1000,
-        dist2Threshold=150.0,
+        dist2Threshold=200.0,
         detectShadows=True
     )
 
