@@ -3,12 +3,54 @@ import numpy as np
 from collections import defaultdict, deque
 import os
 
+# ===== CONFIGURATION PARAMETERS =====
+PARAMS = {
+    # Training Parameters
+    'num_pattern_pairs': 4,  # Number of regular+mirrored pairs to add before final segment
+    'learning_rate': 0.001,  # Constant learning rate for background subtraction
+    'background_alpha': 0.05,  # Alpha for background accumulator
+
+    # Background Subtractor Parameters
+    'knn_history': 500,  # KNN history length
+    'knn_dist_threshold': 200.0,  # KNN distance threshold
+    'detect_shadows': True,  # Whether to detect shadows
+
+    # Contour Tracking Parameters
+    'max_history': 30,  # Maximum history for contour tracking
+    'motion_threshold': 2.5,  # Motion threshold for stationary object detection
+    'consistency_threshold': 0.8,  # Consistency threshold
+
+    # Morphological Operations
+    'morph_kernel_sizes': {
+        'small': (3, 3),
+        'medium': (5, 5),
+        'large': (7, 7)
+    },
+    'morph_iterations': {
+        'open': 2,
+        'close_medium': 4,
+        'close_large': 4
+    },
+
+    # Area Filtering
+    'min_contour_area': 800,  # Minimum contour area to consider
+    'max_area_ratio': 0.8,  # Maximum area as ratio of frame size
+
+    # Display Parameters
+    'display_scale': 0.5,  # Scale factor for display windows
+    'progress_update_interval': 20,  # Frame interval for progress updates
+}
+
+
+# ====================================
+
+
 class ContourTracker:
-    def __init__(self, max_history=15, motion_threshold=2.0, consistency_threshold=0.8):
-        self.contour_history = defaultdict(lambda: deque(maxlen=max_history))
-        self.motion_threshold = motion_threshold
-        self.consistency_threshold = consistency_threshold
-        self.max_history = max_history
+    def __init__(self):
+        self.contour_history = defaultdict(lambda: deque(maxlen=PARAMS['max_history']))
+        self.motion_threshold = PARAMS['motion_threshold']
+        self.consistency_threshold = PARAMS['consistency_threshold']
+        self.max_history = PARAMS['max_history']
         self.prev_frame_gray = None
 
     def calculate_ssim_patch(self, patch1, patch2):
@@ -206,15 +248,6 @@ class ContourTracker:
         # Require at least 3 out of 4 criteria for conservative classification
         is_likely_background = criteria_met >= 3
 
-        # Debug output for significant decisions
-        if is_likely_background and frame_count % 30 == 0:
-            print(f"Frame {frame_count}: Potential background object detected")
-            print(f"  Spatial: {is_spatially_stable}, Motion: {is_motion_stable}")
-            print(f"  Edge: {is_edge_consistent}, SSIM: {is_similar_to_background}")
-            print(f"  Avg motion: {avg_motion:.2f}, Edge consistency: {edge_consistency:.3f}")
-            if ssim_scores:
-                print(f"  SSIM with background: {avg_ssim:.3f}")
-
         return is_likely_background
 
     def update_previous_frame(self, gray_frame):
@@ -222,12 +255,55 @@ class ContourTracker:
         self.prev_frame_gray = gray_frame.copy()
 
 
-def enhanced_background_subtraction_with_postprocessing(input_path, binary_output_path=None,
-                                                        extracted_output_path=None,
-                                                        num_training_passes=1):
+def create_multi_pattern_video(all_frames):
     """
-    Enhanced GMM background subtraction with intelligent post-processing
-    Uses temporal consistency, optical flow, SSIM, and edge density analysis
+    Create extended video with configurable number of regular+mirrored pairs plus final regular segment
+    """
+    original_length = len(all_frames)
+    num_pairs = PARAMS['num_pattern_pairs']
+
+    # Create the pattern segments
+    extended_frames = []
+    segment_info = []
+
+    # Add regular+mirrored pairs
+    for i in range(num_pairs):
+        # Regular segment
+        extended_frames.extend(all_frames.copy())
+        segment_info.append(f"REGULAR-{i + 1}")
+
+        # Mirrored segment
+        extended_frames.extend(all_frames[::-1])
+        segment_info.append(f"MIRRORED-{i + 1}")
+
+    # Add final regular segment
+    final_segment_start = len(extended_frames)
+    extended_frames.extend(all_frames.copy())
+    segment_info.append("REGULAR-FINAL")
+
+    print(f"Multi-pattern video creation:")
+    print(f"  Original video length: {original_length} frames")
+    print(f"  Number of regular+mirrored pairs: {num_pairs}")
+
+    current_frame = 0
+    for i, segment_name in enumerate(segment_info):
+        start_frame = current_frame + 1
+        end_frame = current_frame + original_length
+        print(f"  Segment {i + 1} ({segment_name}): frames {start_frame}-{end_frame}")
+        current_frame = end_frame
+
+    print(f"  Total extended video length: {len(extended_frames)} frames")
+    print(f"  Final segment starts at frame: {final_segment_start + 1}")
+
+    return extended_frames, final_segment_start, segment_info
+
+
+def enhanced_background_subtraction_with_multi_pattern(input_path, binary_output_path=None,
+                                                       extracted_output_path=None):
+    """
+    Enhanced GMM background subtraction with multi-pattern training
+    Pattern: regular + mirrored + regular + mirrored + regular
+    Only the final regular segment is saved to output
     """
 
     # Check if input file exists
@@ -251,53 +327,31 @@ def enhanced_background_subtraction_with_postprocessing(input_path, binary_outpu
     print(f"  Resolution: {width}x{height}")
     print(f"  FPS: {fps}")
     print(f"  Total frames: {total_frames}")
-    print(f"  Training passes: {num_training_passes}")
 
     # Create GMM background subtractor
     backSub = cv2.createBackgroundSubtractorKNN(
-        history=1000,
-        dist2Threshold=200.0,
-        detectShadows=True
+        history=PARAMS['knn_history'],
+        dist2Threshold=PARAMS['knn_dist_threshold'],
+        detectShadows=PARAMS['detect_shadows']
     )
 
     # Load all frames
     print("\nLoading video frames...")
     cap = cv2.VideoCapture(input_path)
-    all_frames = []
+    original_frames = []
     while True:
         ret, frame = cap.read()
         if not ret:
             break
-        all_frames.append(frame)
+        original_frames.append(frame)
     cap.release()
-    print(f"Loaded {len(all_frames)} frames")
+    print(f"Loaded {len(original_frames)} frames")
 
-    # Training passes (same as original)
-    for pass_num in range(1, num_training_passes + 1):
-        print(f"\n=== PASS {pass_num}: Training Pass ===")
-        flip_pass = (pass_num % 2 == 0)
+    # Create multi-pattern extended video
+    print(f"\nCreating multi-pattern video...")
+    extended_frames, final_segment_start, segment_info = create_multi_pattern_video(original_frames)
 
-        if flip_pass:
-            print(f"Training GMM model (pass {pass_num} - FLIPPED)...")
-            frames_to_process = all_frames[::-1]
-        else:
-            print(f"Training GMM model (pass {pass_num} - NORMAL)...")
-            frames_to_process = all_frames
-
-        frame_count = 0
-        for frame in frames_to_process:
-            frame_count += 1
-            _ = backSub.apply(frame)
-
-            if frame_count % 50 == 0:
-                progress = (frame_count / total_frames) * 100
-                direction = "FLIPPED" if flip_pass else "NORMAL"
-                print(f"Pass {pass_num} ({direction}) progress: {progress:.1f}%")
-
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
-
-    # Setup video writers
+    # Setup video writers for final segment only
     binary_out = None
     extracted_out = None
 
@@ -316,42 +370,70 @@ def enhanced_background_subtraction_with_postprocessing(input_path, binary_outpu
         extracted_out = cv2.VideoWriter(extracted_output_path, fourcc, fps, (width, height), isColor=True)
 
     # Initialize enhanced tracking
-    contour_tracker = ContourTracker(max_history=15, motion_threshold=2.5, consistency_threshold=0.8)
+    contour_tracker = ContourTracker()
 
     # Background accumulator for SSIM comparison
     background_accumulator = None
     background_count = 0
+    num_training_segments = len(segment_info) - 1
 
-    print(f"\n=== ENHANCED INFERENCE PASS ===")
-    print("Processing with temporal consistency, optical flow, SSIM, and edge analysis...")
+    print(f"\n=== MULTI-PATTERN TRAINING AND INFERENCE ===")
+    print(f"Processing {len(segment_info)} segments ({num_training_segments} training + 1 final)")
+    print(f"Training on first {num_training_segments} segments, saving only the final segment")
+    print(f"Using constant learning rate: {PARAMS['learning_rate']}")
 
     frame_count = 0
-    for frame in all_frames:
+    final_segment_frame_count = 0
+    original_length = len(original_frames)
+
+    for frame in extended_frames:
         frame_count += 1
         gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-        # Standard GMM processing
-        fgMask = backSub.apply(frame, learningRate=0.001)
+        # Determine current segment
+        segment_idx = frame_count // original_length
+        if segment_idx >= len(segment_info):
+            segment_idx = len(segment_info) - 1
+        current_segment = segment_info[segment_idx]
+        is_final_segment = frame_count > final_segment_start
+
+        if is_final_segment:
+            final_segment_frame_count += 1
+
+        # Apply background subtraction with constant learning rate
+        learning_rate = PARAMS['learning_rate']
+        fgMask = backSub.apply(frame, learningRate=learning_rate)
         fgMask[fgMask == 127] = 0  # Remove shadows
 
-        # Morphological operations
-        kernel_small = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        kernel_medium = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        kernel_large = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        # Morphological operations using parameters
+        if is_final_segment and final_segment_frame_count > 20:
+            # Enhanced operations for final segment
+            kernel_small = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, PARAMS['morph_kernel_sizes']['small'])
+            kernel_medium = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, PARAMS['morph_kernel_sizes']['medium'])
+            kernel_large = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, PARAMS['morph_kernel_sizes']['large'])
 
-        fgMask = cv2.morphologyEx(fgMask, cv2.MORPH_OPEN, kernel_small, iterations=2)
-        fgMask = cv2.morphologyEx(fgMask, cv2.MORPH_CLOSE, kernel_medium, iterations=4)
-        fgMask = cv2.morphologyEx(fgMask, cv2.MORPH_CLOSE, kernel_large, iterations=4)
+            fgMask = cv2.morphologyEx(fgMask, cv2.MORPH_OPEN, kernel_small,
+                                      iterations=PARAMS['morph_iterations']['open'])
+            fgMask = cv2.morphologyEx(fgMask, cv2.MORPH_CLOSE, kernel_medium,
+                                      iterations=PARAMS['morph_iterations']['close_medium'])
+            fgMask = cv2.morphologyEx(fgMask, cv2.MORPH_CLOSE, kernel_large,
+                                      iterations=PARAMS['morph_iterations']['close_large'])
+        else:
+            # Basic operations for training segments
+            kernel_small = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
+            kernel_medium = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (4, 4))
 
-        # Build background reference
+            fgMask = cv2.morphologyEx(fgMask, cv2.MORPH_OPEN, kernel_small, iterations=1)
+            fgMask = cv2.morphologyEx(fgMask, cv2.MORPH_CLOSE, kernel_medium, iterations=2)
+
+        # Build background reference with configurable alpha
         if background_accumulator is None:
             background_accumulator = gray_frame.astype(np.float32)
             background_count = 1
         else:
-            # Update background with low learning rate
-            alpha = 0.02
+            alpha = PARAMS['background_alpha']
             background_accumulator = (1 - alpha) * background_accumulator + alpha * gray_frame.astype(np.float32)
-            background_count = min(background_count + 1, 100)
+            background_count = min(background_count + 1, 300)
 
         # Find contours
         contours, _ = cv2.findContours(fgMask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -362,8 +444,8 @@ def enhanced_background_subtraction_with_postprocessing(input_path, binary_outpu
         for contour in contours:
             area = cv2.contourArea(contour)
 
-            # Basic area filtering
-            if area < 600 or area > width * height * 0.8:
+            # Area filtering using parameters
+            if area < PARAMS['min_contour_area'] or area > width * height * PARAMS['max_area_ratio']:
                 continue
 
             # Extract ROI
@@ -371,18 +453,22 @@ def enhanced_background_subtraction_with_postprocessing(input_path, binary_outpu
             roi = frame[y:y + h, x:x + w]
             gray_roi = gray_frame[y:y + h, x:x + w]
 
-            # Get background ROI for comparison (if available)
+            # Get background ROI for comparison
             background_roi = None
-            if background_count > 10:
+            if background_count > 20:
                 background_roi = background_accumulator[y:y + h, x:x + w].astype(np.uint8)
 
-            # Check if this contour represents a stationary background object
-            is_background = contour_tracker.is_stationary_object(
-                contour, roi, gray_roi, gray_frame, frame_count, background_roi
-            )
+            # Use enhanced tracking only for final segment
+            if is_final_segment and final_segment_frame_count > 20:
+                # Enhanced tracking for stable final frames
+                is_background = contour_tracker.is_stationary_object(
+                    contour, roi, gray_roi, gray_frame, frame_count, background_roi
+                )
 
-            if not is_background:
-                # Add valid foreground contour to enhanced mask
+                if not is_background:
+                    cv2.fillPoly(enhanced_mask, [contour], 255)
+            else:
+                # Use basic detection for training segments and early final frames
                 cv2.fillPoly(enhanced_mask, [contour], 255)
 
         # Update optical flow reference
@@ -394,25 +480,64 @@ def enhanced_background_subtraction_with_postprocessing(input_path, binary_outpu
         # Create extracted foreground
         extracted_frame = cv2.bitwise_and(frame, frame, mask=fgMask)
 
-        # Save frames
-        if binary_out is not None:
-            binary_out.write(fgMask)
-        if extracted_out is not None:
-            extracted_out.write(extracted_frame)
+        # Save frames ONLY for final segment
+        if is_final_segment:
+            if binary_out is not None:
+                binary_out.write(fgMask)
+            if extracted_out is not None:
+                extracted_out.write(extracted_frame)
 
-        # Display progress
-        if frame_count % 30 == 0:
-            progress = (frame_count / total_frames) * 100
-            print(f"Enhanced processing: {progress:.1f}% ({frame_count}/{total_frames})")
+        # Display progress with segment information
+        if frame_count % PARAMS['progress_update_interval'] == 0:
+            if is_final_segment:
+                progress = (final_segment_frame_count / len(original_frames)) * 100
+                print(f"🎯 FINAL SEGMENT: {progress:.1f}% ({final_segment_frame_count}/{len(original_frames)}) - "
+                      f"Total frame: {frame_count}/{len(extended_frames)}")
+            else:
+                segment_progress = ((frame_count % original_length) / original_length) * 100
+                print(f"🔄 TRAINING - {current_segment}: {segment_progress:.1f}% - "
+                      f"Frame: {frame_count}/{len(extended_frames)}")
 
-        # Display frames
-        frame_resized = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)
-        extracted_resized = cv2.resize(extracted_frame, (0, 0), fx=0.5, fy=0.5)
-        mask_resized = cv2.resize(fgMask, (0, 0), fx=0.5, fy=0.5)
+        # Display frames with segment information
+        scale = PARAMS['display_scale']
+        frame_resized = cv2.resize(frame, (0, 0), fx=scale, fy=scale)
+        extracted_resized = cv2.resize(extracted_frame, (0, 0), fx=scale, fy=scale)
+        mask_resized = cv2.resize(fgMask, (0, 0), fx=scale, fy=scale)
 
-        cv2.imshow('Original Frame', frame_resized)
-        cv2.imshow('Enhanced Binary Mask', mask_resized)
-        cv2.imshow('Enhanced Extracted Foreground', extracted_resized)
+        # Add segment and frame information
+        status_text = f"FINAL - SAVING" if is_final_segment else "TRAINING"
+        color = (0, 255, 0) if is_final_segment else (0, 165, 255)  # Green for final, orange for training
+
+        frame_display = frame_resized.copy()
+        cv2.putText(frame_display, f"{current_segment} - {status_text}",
+                    (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+        cv2.putText(frame_display, f"Frame {frame_count}/{len(extended_frames)}",
+                    (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+
+        extracted_display = extracted_resized.copy()
+        cv2.putText(extracted_display, f"{current_segment} - {status_text}",
+                    (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+        cv2.putText(extracted_display, f"Frame {frame_count}/{len(extended_frames)}",
+                    (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+
+        mask_display = cv2.cvtColor(mask_resized, cv2.COLOR_GRAY2BGR)
+        cv2.putText(mask_display, f"{current_segment} - {status_text}",
+                    (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+        cv2.putText(mask_display, f"Frame {frame_count}/{len(extended_frames)}",
+                    (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+
+        cv2.imshow('Multi-Pattern Video Frame', frame_display)
+        cv2.imshow('Enhanced Binary Mask', mask_display)
+        cv2.imshow('Enhanced Extracted Foreground', extracted_display)
+
+        # Add visual separator when transitioning to final segment
+        if frame_count == final_segment_start + 1:
+            print("\n" + "=" * 80)
+            print("🎬 STARTING FINAL SEGMENT - NOW SAVING TO OUTPUT FILES 🎬")
+            print("=" * 80)
+            print(f"Background model has been extensively trained on {num_training_segments} segments!")
+            print("The final segment should have excellent foreground extraction!")
+            print("=" * 80 + "\n")
 
         if cv2.waitKey(1) & 0xFF == ord('q'):
             print("Processing interrupted by user")
@@ -425,24 +550,34 @@ def enhanced_background_subtraction_with_postprocessing(input_path, binary_outpu
         extracted_out.release()
     cv2.destroyAllWindows()
 
-    print(f"\n=== ENHANCED PROCESSING COMPLETED ===")
-    print(f"Used temporal consistency, optical flow, SSIM, and edge density analysis")
-    print(f"Total frames processed: {frame_count}")
+    print(f"\n=== MULTI-PATTERN PROCESSING COMPLETED ===")
+    print(f"Training segments processed: {final_segment_start} frames")
+    print(f"Final segment frames saved: {final_segment_frame_count}")
+    print(f"Output files contain only the final segment")
+    print(f"Background model trained on {num_training_segments * len(original_frames)} frames before final processing!")
 
 
 def main():
     # Define file paths
+    os.chdir('..')
     wrkdir = os.getcwd()
     INPUT_VIDEO = fr"{wrkdir}\Outputs\background_locked.avi"
-    BINARY_OUTPUT = fr"{wrkdir}\Outputs\enhanced_binary.avi"
-    EXTRACTED_OUTPUT = fr"{wrkdir}\Outputs\enhanced_extracted.avi"
+    BINARY_OUTPUT = fr"{wrkdir}\Outputs\multi_pattern_binary.avi"
+    EXTRACTED_OUTPUT = fr"{wrkdir}\Outputs\multi_pattern_extracted.avi"
 
-    # Run enhanced background subtraction
-    enhanced_background_subtraction_with_postprocessing(
+    print("=== MULTI-PATTERN BACKGROUND SUBTRACTION ===")
+    print(f"Configuration:")
+    print(f"  Number of regular+mirrored pairs: {PARAMS['num_pattern_pairs']}")
+    print(f"  Learning rate: {PARAMS['learning_rate']}")
+    print(f"  Background alpha: {PARAMS['background_alpha']}")
+    print(f"  Min contour area: {PARAMS['min_contour_area']}")
+    print("=" * 50)
+
+    # Run enhanced background subtraction with multi-pattern training
+    enhanced_background_subtraction_with_multi_pattern(
         INPUT_VIDEO,
         BINARY_OUTPUT,
-        EXTRACTED_OUTPUT,
-        num_training_passes=5
+        EXTRACTED_OUTPUT
     )
 
 
