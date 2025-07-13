@@ -561,9 +561,15 @@ def main():
     # Define file paths
     os.chdir('..')
     wrkdir = os.getcwd()
+    """"
     INPUT_VIDEO = fr"{wrkdir}\Outputs\background_locked.avi"
     BINARY_OUTPUT = fr"{wrkdir}\Outputs\multi_pattern_binary.avi"
     EXTRACTED_OUTPUT = fr"{wrkdir}\Outputs\multi_pattern_extracted.avi"
+    """
+    # Test on new stabilized video
+    INPUT_VIDEO = fr"{wrkdir}\Outputs\bg_log_stabilzation_same_dim.avi"
+    BINARY_OUTPUT = fr"{wrkdir}\Outputs\multi_pattern_binary_same_dim.avi"
+    EXTRACTED_OUTPUT = fr"{wrkdir}\Outputs\multi_pattern_extracted_same_dim.avi"
 
     print("=== MULTI-PATTERN BACKGROUND SUBTRACTION ===")
     print(f"Configuration:")
