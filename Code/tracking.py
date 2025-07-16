@@ -17,7 +17,7 @@ class AdaptivePersonTracker:
         """Set up tracker with initial bounding box"""
         x, y, w, h = initial_bbox
         self.current_bbox = (x, y, w, h)
-        self.bbox_history = [initial_bbox] * 3  # Moderate initialization for balance
+        self.bbox_history = [initial_bbox] * 3
 
         # Extract region of interest with padding to get more context
         padding = 10
@@ -99,7 +99,7 @@ class AdaptivePersonTracker:
         avg_w /= total_weight
         avg_h /= total_weight
 
-        # Moderate smoothing - more responsive to changes
+        # Moderate smoothin
         stable_x = int(avg_x * self.stability_weight + validated_bbox[0] * (1 - self.stability_weight))
         stable_y = int(avg_y * self.stability_weight + validated_bbox[1] * (1 - self.stability_weight))
         stable_w = int(avg_w * self.stability_weight + validated_bbox[2] * (1 - self.stability_weight))

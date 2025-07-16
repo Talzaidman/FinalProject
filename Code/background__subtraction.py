@@ -497,7 +497,7 @@ def enhanced_background_subtraction_with_multi_pattern(input_path, binary_output
                 segment_progress = ((frame_count % original_length) / original_length) * 100
                 print(f"🔄 TRAINING - {current_segment}: {segment_progress:.1f}% - "
                       f"Frame: {frame_count}/{len(extended_frames)}")
-
+        """
         # Display frames with segment information
         scale = PARAMS['display_scale']
         frame_resized = cv2.resize(frame, (0, 0), fx=scale, fy=scale)
@@ -529,7 +529,7 @@ def enhanced_background_subtraction_with_multi_pattern(input_path, binary_output
         cv2.imshow('Multi-Pattern Video Frame', frame_display)
         cv2.imshow('Enhanced Binary Mask', mask_display)
         cv2.imshow('Enhanced Extracted Foreground', extracted_display)
-
+        
         # Add visual separator when transitioning to final segment
         if frame_count == final_segment_start + 1:
             print("\n" + "=" * 80)
@@ -542,7 +542,7 @@ def enhanced_background_subtraction_with_multi_pattern(input_path, binary_output
         if cv2.waitKey(1) & 0xFF == ord('q'):
             print("Processing interrupted by user")
             break
-
+        """
     # Cleanup
     if binary_out is not None:
         binary_out.release()

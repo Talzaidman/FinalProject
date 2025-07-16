@@ -13,10 +13,10 @@ os.chdir('..')
 ID1 = '318452364'
 ID2 = '207767021'
 
-# Choose parameters
-WINDOW_SIZE_TAU = 5  # Add your value here!
-MAX_ITER_TAU = 7  # Add your value here!
-NUM_LEVELS_TAU = 5  # Add your value here!
+# Set parameters
+WINDOW_SIZE_TAU = 5
+MAX_ITER_TAU = 7
+NUM_LEVELS_TAU = 5
 
 if __name__ == "__main__":
     print("Starting video processing pipeline...")

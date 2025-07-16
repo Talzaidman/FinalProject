@@ -48,7 +48,7 @@ def background_lock_stabilization(input_path, output_path):
 
     # Create output video with ORIGINAL dimensions (not cropped)
     fourcc = cv2.VideoWriter_fourcc(*'XVID')
-    out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))  # Original size!
+    out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
 
     # Process first frame - crop and pad back to original size
     first_cropped = reference_frame[crop_h:height - crop_h, crop_w:width - crop_w]
